@@ -465,6 +465,7 @@ internal_delete(VHost, ActingUser) ->
     _ = rabbit_khepri:try_mnesia_or_khepri(
           fun() -> internal_delete_in_mnesia_part1(VHost, ActingUser) end,
           fun() -> ok end),
+    %% FIXME: Use keep_until conditions to maintain atomicity in Khepri.
     Fs1 = [rabbit_runtime_parameters:clear(VHost,
                                            proplists:get_value(component, Info),
                                            proplists:get_value(name, Info),
