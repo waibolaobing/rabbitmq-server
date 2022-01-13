@@ -247,7 +247,8 @@ user_limits_migration(_FeatureName, _FeatureProps, post_enabled_locally) ->
 -define(MDS_PHASE1_TABLES, [rabbit_vhost,
                             rabbit_user,
                             rabbit_user_permission,
-                            rabbit_topic_permission]).
+                            rabbit_topic_permission,
+                            rabbit_runtime_parameters]).
 
 mds_phase1_migration(_FeatureName, _FeatureProps, is_enabled) ->
     %% We don't check if the migration was done already because we also need
@@ -489,6 +490,10 @@ clear_data_from_previous_attempt(
 clear_data_from_previous_attempt(
   FeatureName, [rabbit_topic_permission | Rest]) ->
     clear_data_from_previous_attempt(FeatureName, Rest);
+clear_data_from_previous_attempt(
+  FeatureName, [rabbit_runtime_parameters | Rest]) ->
+    ok = rabbit_runtime_parameters:clear_data_in_khepri(),
+    clear_data_from_previous_attempt(FeatureName, Rest);
 clear_data_from_previous_attempt(_, []) ->
     ok.
 
@@ -532,6 +537,11 @@ copy_from_mnesia_to_khepri(
 copy_from_mnesia_to_khepri(
   FeatureName, [rabbit_topic_permission = Table | Rest]) ->
     Fun = fun rabbit_auth_backend_internal:mnesia_write_to_khepri/1,
+    do_copy_from_mnesia_to_khepri(FeatureName, Table, Fun),
+    copy_from_mnesia_to_khepri(FeatureName, Rest);
+copy_from_mnesia_to_khepri(
+  FeatureName, [rabbit_runtime_parameters = Table | Rest]) ->
+    Fun = fun rabbit_runtime_parameters:mnesia_write_to_khepri/1,
     do_copy_from_mnesia_to_khepri(FeatureName, Table, Fun),
     copy_from_mnesia_to_khepri(FeatureName, Rest);
 copy_from_mnesia_to_khepri(_, []) ->
@@ -659,7 +669,9 @@ handle_mnesia_delete(rabbit_user, Username) ->
 handle_mnesia_delete(rabbit_user_permission, UserVHost) ->
     rabbit_auth_backend_internal:mnesia_delete_to_khepri(UserVHost);
 handle_mnesia_delete(rabbit_topic_permission, TopicPermissionKey) ->
-    rabbit_auth_backend_internal:mnesia_delete_to_khepri(TopicPermissionKey).
+    rabbit_auth_backend_internal:mnesia_delete_to_khepri(TopicPermissionKey);
+handle_mnesia_delete(rabbit_runtime_parameters, RuntimeParamKey) ->
+    rabbit_runtime_parameters:mnesia_delete_to_khepri(RuntimeParamKey).
 
 %% We can't remove unused tables at this point yet. The reason is that tables
 %% are synchronized before feature flags in `rabbit_mnesia`. So if a node is
