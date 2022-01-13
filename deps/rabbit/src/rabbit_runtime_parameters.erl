@@ -207,7 +207,7 @@ khepri_update(VHost, Comp, Name, Term) ->
 khepri_update_fun(Key, Term) ->
     Path = khepri_rp_path(Key),
     fun () ->
-            case khepri_tx:put(Path, ?DATA_PAYLOAD(c(Key, Term))) of
+            case khepri_tx:put(Path, #kpayload_data{data = c(Key, Term)}) of
                 {ok, #{Path := #{data := Params}}} ->
                     {old, Params#runtime_parameters.value};
                 {ok, _} ->
@@ -545,7 +545,7 @@ lookup_missing_in_khepri(Key, Default) ->
                       R;
                   {ok, _} ->
                       Record = c(Key, Default),
-                      khepri_tx:put(Path, ?DATA_PAYLOAD(Record)),
+                      khepri_tx:put(Path, #kpayload_data{data = Record}),
                       Record
               end
       end).
