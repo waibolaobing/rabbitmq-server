@@ -341,8 +341,9 @@ list_in_mnesia() ->
 
 list_in_khepri() ->
     Path = khepri_vhost_rp_path(?STAR, ?STAR, ?STAR),
-    [p(P) || #runtime_parameters{ key = {_VHost, Comp, _Name}} = P <-
-             maps:values(rabbit_khepri:match_and_get_data(Path)), Comp /= <<"policy">>].
+    {ok, Map} = rabbit_khepri:match_and_get_data(Path),
+    [p(P) || #runtime_parameters{ key = {_VHost, Comp, _Name}} = P <- maps:values(Map),
+             Comp /= <<"policy">>].
 
 -spec list(rabbit_types:vhost() | '_') -> [rabbit_types:infos()].
 
@@ -386,7 +387,10 @@ list_in_khepri(VHost, Component) ->
       fun() ->
               case VHost of
                   ?STAR -> ok;
-                  _     -> rabbit_vhost:assert(VHost)
+                  %% Inside of a transaction, using `rabbit_vhost:exists` will cause
+                  %% a deadlock and timeout on the transaction, as it uses `rabbit_khepri:exists`.
+                  %% The `with` function uses the `khepri_tx` API instead
+                  _     -> rabbit_vhost:with(VHost, fun() -> ok end)
               end,
               case khepri_tx:get(Path) of
                   {ok, Result} ->
