@@ -826,19 +826,17 @@ phase_update_mnesia(StreamId, Args, #{reference := QName,
                                   amqqueue:set_type_state(
                                     amqqueue:set_pid(Q, LeaderPid), Conf);
                               Ts ->
-                                  S = maps:get(name, Ts, undefined),
-                                  rabbit_log:debug("~s: refusing mnesia update for stale stream id ~s, current ~s",
-                                                   [?MODULE, StreamId, S]),
+                                  _S = maps:get(name, Ts, undefined),
+                                  %% TODO log as side-effect
+                                  %% rabbit_log:debug("~s: refusing mnesia update for stale stream id ~s, current ~s",
+                                  %%                  [?MODULE, StreamId, S]),
                                   %% if the stream id isn't a match this is a stale
                                   %% update from a previous stream incarnation for the
                                   %% same queue name and we ignore it
                                   Q
                           end
                   end,
-            try rabbit_misc:execute_mnesia_transaction(
-                  fun() ->
-                          rabbit_amqqueue:update(QName, Fun)
-                  end) of
+            try rabbit_amqqueue:update_in_tx(QName, Fun) of
                 not_found ->
                     rabbit_log:debug("~s: resource for stream id ~s not found, "
                                      "recovering from rabbit_durable_queue",
@@ -846,7 +844,7 @@ phase_update_mnesia(StreamId, Args, #{reference := QName,
                     %% This can happen during recovery
                     %% we need to re-initialise the queue record
                     %% if the stream id is a match
-                    [Q] = mnesia:dirty_read(rabbit_durable_queue, QName),
+                    {ok, Q} = rabbit_amqqueue:lookup_durable_queue(QName),
                     case amqqueue:get_type_state(Q) of
                         #{name := S} when S == StreamId ->
                             rabbit_log:debug("~s: initializing queue record for stream id  ~s",

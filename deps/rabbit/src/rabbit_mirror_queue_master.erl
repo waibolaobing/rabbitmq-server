@@ -93,19 +93,7 @@ init_with_existing_bq(Q0, BQ, BQS) when ?is_amqqueue(Q0) ->
     {ok, CPid} ->
         GM = rabbit_mirror_queue_coordinator:get_gm(CPid),
         Self = self(),
-        Fun = fun () ->
-                  [Q1] = mnesia:read({rabbit_queue, QName}),
-                  true = amqqueue:is_amqqueue(Q1),
-                  GMPids0 = amqqueue:get_gm_pids(Q1),
-                  GMPids1 = [{GM, Self} | GMPids0],
-                  Q2 = amqqueue:set_gm_pids(Q1, GMPids1),
-                  Q3 = amqqueue:set_state(Q2, live),
-                  %% amqqueue migration:
-                  %% The amqqueue was read from this transaction, no
-                  %% need to handle migration.
-                  ok = rabbit_amqqueue:store_queue(Q3)
-              end,
-        ok = rabbit_misc:execute_mnesia_transaction(Fun),
+        migrate_queue_record(QName, GM, Self),
         {_MNode, SNodes} = rabbit_mirror_queue_misc:suggested_queue_nodes(Q0),
         %% We need synchronous add here (i.e. do not return until the
         %% mirror is running) so that when queue declaration is finished
@@ -130,6 +118,40 @@ init_with_existing_bq(Q0, BQ, BQS) when ?is_amqqueue(Q0) ->
         % is trapping exists
         throw({coordinator_not_started, Reason})
     end.
+
+migrate_queue_record(QName, GM, Self) ->
+    rabbit_khepri:try_mnesia_or_khepri(
+      fun() -> migrate_queue_record_in_mnesia(QName, GM, Self) end,
+      fun() -> migrate_queue_record_in_khepri(QName, GM, Self) end).
+
+migrate_queue_record_in_mnesia(QName, GM, Self) ->
+    Fun = fun () ->
+                  [Q1] = mnesia:read({rabbit_queue, QName}),
+                  true = amqqueue:is_amqqueue(Q1),
+                  GMPids0 = amqqueue:get_gm_pids(Q1),
+                  GMPids1 = [{GM, Self} | GMPids0],
+                  Q2 = amqqueue:set_gm_pids(Q1, GMPids1),
+                  Q3 = amqqueue:set_state(Q2, live),
+                  %% amqqueue migration:
+                  %% The amqqueue was read from this transaction, no
+                  %% need to handle migration.
+                  ok = rabbit_amqqueue:store_queue(Q3)
+          end,
+    ok = rabbit_misc:execute_mnesia_transaction(Fun).
+
+migrate_queue_record_in_khepri(QName, GM, Self) ->
+    %% TODO
+    Fun = fun () ->
+                  [Q1] = rabbit_amqqueue:lookup_as_list_in_khepri(rabbit_queue, QName),
+                  true = amqqueue:is_amqqueue(Q1),
+                  GMPids0 = amqqueue:get_gm_pids(Q1),
+                  GMPids1 = [{GM, Self} | GMPids0],
+                  Q2 = amqqueue:set_gm_pids(Q1, GMPids1),
+                  Q3 = amqqueue:set_state(Q2, live),
+                  ok = rabbit_amqqueue:store_queue_in_khepri(Q3),
+                  ok = rabbit_amqqueue:store_queue_ram_in_khepri(Q3)
+          end,
+    ok = rabbit_khepri:transaction(Fun, rw).
 
 -spec stop_mirroring(master_state()) -> {atom(), any()}.
 

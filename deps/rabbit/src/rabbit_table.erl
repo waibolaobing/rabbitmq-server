@@ -372,16 +372,7 @@ definitions() ->
      {rabbit_exchange_serial,
       [{record_name, exchange_serial},
        {attributes, record_info(fields, exchange_serial)},
-       {match, #exchange_serial{name = exchange_name_match(), _='_'}}]},
-     {rabbit_durable_queue,
-      [{record_name, amqqueue},
-       {attributes, amqqueue:fields()},
-       {disc_copies, [node()]},
-       {match, amqqueue:pattern_match_on_name(queue_name_match())}]},
-     {rabbit_queue,
-      [{record_name, amqqueue},
-       {attributes, amqqueue:fields()},
-       {match, amqqueue:pattern_match_on_name(queue_name_match())}]}
+       {match, #exchange_serial{name = exchange_name_match(), _='_'}}]}
     ]
         ++ PreKhepriDefs
         ++ gm:table_definitions()
@@ -417,7 +408,16 @@ pre_khepri_definitions() ->
        {record_name, vhost},
        {attributes, vhost:fields()},
        {disc_copies, [node()]},
-       {match, vhost:pattern_match_all()}]}
+       {match, vhost:pattern_match_all()}]},
+     {rabbit_durable_queue,
+      [{record_name, amqqueue},
+       {attributes, amqqueue:fields()},
+       {disc_copies, [node()]},
+       {match, amqqueue:pattern_match_on_name(queue_name_match())}]},
+     {rabbit_queue,
+      [{record_name, amqqueue},
+       {attributes, amqqueue:fields()},
+       {match, amqqueue:pattern_match_on_name(queue_name_match())}]}
     ].
 
 binding_match() ->

@@ -333,7 +333,7 @@ delete(VHost, ActingUser) ->
     With = with(VHost, fun () -> internal_delete(VHost, ActingUser) end),
     Funs = rabbit_khepri:try_mnesia_or_khepri(
              fun() -> rabbit_misc:execute_mnesia_transaction(With) end,
-             fun() -> With() end),
+             fun() -> rabbit_khepri:transaction(With) end),
     ok = rabbit_event:notify(vhost_deleted, [{name, VHost},
                                              {user_who_performed_action, ActingUser}]),
     [case Fun() of

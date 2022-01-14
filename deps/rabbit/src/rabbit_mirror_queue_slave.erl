@@ -92,6 +92,7 @@ handle_go(Q0) when ?is_amqqueue(Q0) ->
     %% above.
     %%
     process_flag(trap_exit, true), %% amqqueue_process traps exits too.
+    %% TODO handle gm transactions!!!
     {ok, GM} = gm:start_link(QName, ?MODULE, [self()],
                              fun rabbit_misc:execute_mnesia_transaction/1),
     MRef = erlang:monitor(process, GM),
@@ -105,8 +106,7 @@ handle_go(Q0) when ?is_amqqueue(Q0) ->
     end,
     Self = self(),
     Node = node(),
-    case rabbit_misc:execute_mnesia_transaction(
-           fun() -> init_it(Self, GM, Node, QName) end) of
+    case init_it(Self, GM, Node, QName) of
         {new, QPid, GMPids} ->
             ok = file_handle_cache:register_callback(
                    rabbit_amqqueue, set_maximum_since_use, [Self]),
@@ -156,6 +156,18 @@ handle_go(Q0) when ?is_amqqueue(Q0) ->
     end.
 
 init_it(Self, GM, Node, QName) ->
+    rabbit_khepri:try_mnesia_or_khepri(
+      fun() ->
+              rabbit_misc:execute_mnesia_transaction(
+                fun() -> init_it_in_mnesia(Self, GM, Node, QName) end)
+      end,
+      fun() ->
+              rabbit_khepri:transaction(
+                fun() -> init_it_in_khepri(Self, GM, Node, QName) end,
+                rw)
+      end).
+
+init_it_in_mnesia(Self, GM, Node, QName) ->
     case mnesia:read({rabbit_queue, QName}) of
         [Q] when ?is_amqqueue(Q) ->
             QPid = amqqueue:get_pid(Q),
@@ -166,6 +178,38 @@ init_it(Self, GM, Node, QName) ->
                 []     -> stop_pending_slaves(QName, PSPids),
                           add_slave(Q, Self, GM),
                           {new, QPid, GMPids};
+                [QPid] -> case rabbit_mnesia:is_process_alive(QPid) of
+                              true  -> duplicate_live_master;
+                              false -> {stale, QPid}
+                          end;
+                [SPid] -> case rabbit_mnesia:is_process_alive(SPid) of
+                              true  -> existing;
+                              false -> GMPids1 = [T || T = {_, S} <- GMPids, S =/= SPid],
+                                       SPids1 = SPids -- [SPid],
+                                       Q1 = amqqueue:set_slave_pids(Q, SPids1),
+                                       Q2 = amqqueue:set_gm_pids(Q1, GMPids1),
+                                       add_slave(Q2, Self, GM),
+                                       {new, QPid, GMPids1}
+                          end
+            end;
+        [] ->
+            master_in_recovery
+    end.
+
+init_it_in_khepri(Self, GM, Node, QName) ->
+    case rabbit_amqqueue:lookup_as_list_in_khepri(rabbit_queue, QName) of
+        [Q] when ?is_amqqueue(Q) ->
+            QPid = amqqueue:get_pid(Q),
+            SPids = amqqueue:get_slave_pids(Q),
+            GMPids = amqqueue:get_gm_pids(Q),
+            PSPids = amqqueue:get_slave_pids_pending_shutdown(Q),
+            %% TODO we can't kill processes!
+            case [Pid || Pid <- [QPid | SPids], node(Pid) =:= Node] of
+                []     -> stop_pending_slaves(QName, PSPids),
+                          %% TODO make add_slave_in_khepri and add_slave_in_mnesia
+                          add_slave(Q, Self, GM),
+                          {new, QPid, GMPids};
+                %% TODO is_process_alive should never go on a khepri transaction!
                 [QPid] -> case rabbit_mnesia:is_process_alive(QPid) of
                               true  -> duplicate_live_master;
                               false -> {stale, QPid}
