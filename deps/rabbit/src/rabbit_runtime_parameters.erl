@@ -185,7 +185,8 @@ mnesia_update(Key, Term) ->
 
 mnesia_update(VHost, Comp, Name, Term) ->
     rabbit_misc:execute_mnesia_transaction(
-      rabbit_vhost:with(VHost, mnesia_update_fun({VHost, Comp, Name}, Term))).
+      rabbit_vhost:with_in_mnesia(
+        VHost, mnesia_update_fun({VHost, Comp, Name}, Term))).
 
 mnesia_update_fun(Key, Term) ->
     fun () ->
@@ -202,7 +203,8 @@ khepri_update(Key, Term) ->
 
 khepri_update(VHost, Comp, Name, Term) ->
     rabbit_khepri:transaction(
-      rabbit_vhost:with(VHost, khepri_update_fun({VHost, Comp, Name}, Term))).
+      rabbit_vhost:with_in_khepri(
+        VHost, khepri_update_fun({VHost, Comp, Name}, Term))).
 
 khepri_update_fun(Key, Term) ->
     Path = khepri_rp_path(Key),
@@ -302,7 +304,8 @@ mnesia_clear(VHost, Component, Name) ->
     F = fun () ->
                 ok = mnesia:delete(?TABLE, {VHost, Component, Name}, write)
         end,
-    ok = rabbit_misc:execute_mnesia_transaction(rabbit_vhost:with(VHost, F)).
+    ok = rabbit_misc:execute_mnesia_transaction(
+           rabbit_vhost:with_in_mnesia(VHost, F)).
 
 khepri_clear(Key) ->
     Path = khepri_rp_path(Key),
@@ -318,7 +321,8 @@ khepri_clear(VHost, Component, Name) ->
                 {ok, _} = khepri_tx:delete(Path),
                 ok
         end,
-    ok = rabbit_khepri:transaction(rabbit_vhost:with(VHost, F)).
+    ok = rabbit_khepri:transaction(
+           rabbit_vhost:with_in_khepri(VHost, F)).
 
 event_notify(_Event, _VHost, <<"policy">>, _Props) ->
     ok;
@@ -390,7 +394,7 @@ list_in_khepri(VHost, Component) ->
                   %% Inside of a transaction, using `rabbit_vhost:exists` will cause
                   %% a deadlock and timeout on the transaction, as it uses `rabbit_khepri:exists`.
                   %% The `with` function uses the `khepri_tx` API instead
-                  _     -> rabbit_vhost:with(VHost, fun() -> ok end)
+                  _     -> rabbit_vhost:with_in_khepri(VHost, fun() -> ok end)
               end,
               case khepri_tx:get(Path) of
                   {ok, Result} ->
