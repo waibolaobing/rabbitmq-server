@@ -11,6 +11,7 @@
 -include("amqqueue.hrl").
 
 -export([select/1, set/1, register/2, unregister/1]).
+-export([set/2, list/0]).
 
 -behaviour(rabbit_registry_class).
 
@@ -41,6 +42,12 @@ select(Modules) ->
 
 set(Q) when ?is_amqqueue(Q) ->
     Decorators = [D || D <- list(), D:active_for(Q)],
+    amqqueue:set_decorators(Q, Decorators).
+
+set(Q, List) when ?is_amqqueue(Q) ->
+    %% ETS queries are not allowed in khepri transactions, we need to lookup
+    %% the registry before setting the decorators.
+    Decorators = [D || D <- List, D:active_for(Q)],
     amqqueue:set_decorators(Q, Decorators).
 
 list() -> [M || {_, M} <- rabbit_registry:lookup_all(queue_decorator)].

@@ -1846,6 +1846,7 @@ update_state_in_mnesia(State, QName) ->
       end).
 
 update_state_in_khepri(State, QName) ->
+    Decorators = rabbit_queue_decorator:list(),
     rabbit_misc:execute_mnesia_transaction(
       fun() ->
               [Q] = rabbit_amqqueue:lookup_as_list_in_khepri(rabbit_queue, QName),
@@ -1854,7 +1855,7 @@ update_state_in_khepri(State, QName) ->
               %% The amqqueue was read from this transaction, no need
               %% to handle migration.
               rabbit_amqqueue:store_queue_in_khepri(Q2),
-              rabbit_amqqueue:store_queue_ram_in_khepri(Q2)
+              rabbit_amqqueue:store_queue_ram_in_khepri(Q2, Decorators)
       end).
 
 upgrade(Q) ->
@@ -1874,16 +1875,17 @@ upgrade_in_mnesia(Q) ->
       end).
 
 upgrade_in_khepri(Q) ->
+    Decorators = rabbit_queue_decorator:list(),
     rabbit_khepri:transaction(
       fun() ->
               ?try_mnesia_tx_or_upgrade_amqqueue_and_retry(
                  begin
                      rabbit_amqqueue:store_queue_in_khepri(Q),
-                     rabbit_amqqueue:store_queue_ram_in_khepri(Q)
+                     rabbit_amqqueue:store_queue_ram_in_khepri(Q, Decorators)
                  end,
                  begin
                      Q1 = amqqueue:upgrade(Q),
                      rabbit_amqqueue:store_queue_in_khepri(Q1),
-                     rabbit_amqqueue:store_queue_ram_in_khepri(Q1)
+                     rabbit_amqqueue:store_queue_ram_in_khepri(Q1, Decorators)
                  end)
       end).

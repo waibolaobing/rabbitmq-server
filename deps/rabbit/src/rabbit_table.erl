@@ -359,20 +359,7 @@ definitions() ->
        {attributes, record_info(fields, topic_trie_binding)},
        {type, ordered_set},
        {match, #topic_trie_binding{trie_binding = trie_binding_match(),
-                                   _='_'}}]},
-     {rabbit_durable_exchange,
-      [{record_name, exchange},
-       {attributes, record_info(fields, exchange)},
-       {disc_copies, [node()]},
-       {match, #exchange{name = exchange_name_match(), _='_'}}]},
-     {rabbit_exchange,
-      [{record_name, exchange},
-       {attributes, record_info(fields, exchange)},
-       {match, #exchange{name = exchange_name_match(), _='_'}}]},
-     {rabbit_exchange_serial,
-      [{record_name, exchange_serial},
-       {attributes, record_info(fields, exchange_serial)},
-       {match, #exchange_serial{name = exchange_name_match(), _='_'}}]}
+                                   _='_'}}]}
     ]
         ++ PreKhepriDefs
         ++ gm:table_definitions()
@@ -417,7 +404,20 @@ pre_khepri_definitions() ->
      {rabbit_queue,
       [{record_name, amqqueue},
        {attributes, amqqueue:fields()},
-       {match, amqqueue:pattern_match_on_name(queue_name_match())}]}
+       {match, amqqueue:pattern_match_on_name(queue_name_match())}]},
+     {rabbit_durable_exchange,
+      [{record_name, exchange},
+       {attributes, record_info(fields, exchange)},
+       {disc_copies, [node()]},
+       {match, #exchange{name = exchange_name_match(), _='_'}}]},
+     {rabbit_exchange,
+      [{record_name, exchange},
+       {attributes, record_info(fields, exchange)},
+       {match, #exchange{name = exchange_name_match(), _='_'}}]},
+     {rabbit_exchange_serial,
+      [{record_name, exchange_serial},
+       {attributes, record_info(fields, exchange_serial)},
+       {match, #exchange_serial{name = exchange_name_match(), _='_'}}]}
     ].
 
 binding_match() ->

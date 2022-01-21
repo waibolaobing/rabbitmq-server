@@ -158,6 +158,7 @@ remove_from_queue_in_mnesia(QueueName, Self, DeadGMPids) ->
 %% not be present in gm_pids, but only if said master has died.
 
 remove_from_queue_in_khepri(QueueName, Self, DeadGMPids) ->
+    Decorators = rabbit_queue_decorator:list(),
     rabbit_khepri:transaction(
       fun () ->
               %% Someone else could have deleted the queue before we
@@ -206,7 +207,7 @@ remove_from_queue_in_khepri(QueueName, Self, DeadGMPids) ->
                               Q1 = amqqueue:set_pid(Q0, QPid1),
                               Q2 = amqqueue:set_slave_pids(Q1, SPids1),
                               Q3 = amqqueue:set_gm_pids(Q2, AliveGM),
-                              store_updated_slaves_in_khepri(Q3),
+                              store_updated_slaves_in_khepri(Q3, Decorators),
                               %% If we add and remove nodes at the
                               %% same time we might tell the old
                               %% master we need to sync and then
@@ -220,7 +221,7 @@ remove_from_queue_in_khepri(QueueName, Self, DeadGMPids) ->
                               %% [1].
                               Q1 = amqqueue:set_slave_pids(Q0, Alive),
                               Q2 = amqqueue:set_gm_pids(Q1, AliveGM),
-                              store_updated_slaves_in_khepri(Q2),
+                              store_updated_slaves_in_khepri(Q2, Decorators),
                               {ok, QPid1, DeadPids, []}
                       end
               end
@@ -402,12 +403,13 @@ log_warning(QName, Fmt, Args) ->
           amqqueue:amqqueue().
 
 store_updated_slaves(Q0) when ?is_amqqueue(Q0) ->
+    Decorators = rabbit_queue_decorator:list(),
     rabbit_khepri:try_mnesia_or_khepri(
       fun() ->
               store_updated_slaves_in_mnesia(Q0)
       end,
       fun() ->
-              store_updated_slaves_in_khepri(Q0)
+              store_updated_slaves_in_khepri(Q0, Decorators)
       end).
 
 store_updated_slaves_in_mnesia(Q0) ->
@@ -429,7 +431,7 @@ store_updated_slaves_in_mnesia(Q0) ->
     rabbit_amqqueue:notify_policy_changed(Q3),
     Q3.
 
-store_updated_slaves_in_khepri(Q0) ->
+store_updated_slaves_in_khepri(Q0, Decorators) ->
     SPids = amqqueue:get_slave_pids(Q0),
     SSPids = amqqueue:get_sync_slave_pids(Q0),
     RS0 = amqqueue:get_recoverable_slaves(Q0),
@@ -444,7 +446,7 @@ store_updated_slaves_in_khepri(Q0) ->
     %% The amqqueue was read from this transaction, no need to handle
     %% migration.
     rabbit_amqqueue:store_queue_in_khepri(Q3),
-    rabbit_amqqueue:store_queue_ram_in_khepri(Q3),
+    rabbit_amqqueue:store_queue_ram_in_khepri(Q3, Decorators),
     %% Wake it up so that we emit a stats event
     %% TODO check this notification in khepri tx!!! It ends up calling the queue type,
     %% it could do anything. I think it should be a side-effect
@@ -519,6 +521,7 @@ remove_all_slaves_in_mnesia(QName, PendingSlavePids) ->
     end).
 
 remove_all_slaves_in_khepri(QName, PendingSlavePids) ->
+    Decorators = rabbit_queue_decorator:list(),
     rabbit_khepri:transaction(
       fun () ->
               [Q0] = rabbit_amqqueue:lookup_as_list_in_khepri(rabbit_queue, QName),
@@ -528,7 +531,7 @@ remove_all_slaves_in_khepri(QName, PendingSlavePids) ->
               %% ensure old incarnations are stopped using
               %% the pending mirror pids.
               Q3 = amqqueue:set_slave_pids_pending_shutdown(Q2, PendingSlavePids),
-              rabbit_mirror_queue_misc:store_updated_slaves_in_khepri(Q3)
+              rabbit_mirror_queue_misc:store_updated_slaves_in_khepri(Q3, Decorators)
       end, rw).
 
 %%----------------------------------------------------------------------------

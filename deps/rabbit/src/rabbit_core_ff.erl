@@ -544,6 +544,31 @@ copy_from_mnesia_to_khepri(
     Fun = fun rabbit_runtime_parameters:mnesia_write_to_khepri/1,
     do_copy_from_mnesia_to_khepri(FeatureName, Table, Fun),
     copy_from_mnesia_to_khepri(FeatureName, Rest);
+copy_from_mnesia_to_khepri(
+  FeatureName, [rabbit_queue = Table | Rest]) ->
+    Fun = fun rabbit_amqqueue:mnesia_write_queue_to_khepri/1,
+    do_copy_from_mnesia_to_khepri(FeatureName, Table, Fun),
+    copy_from_mnesia_to_khepri(FeatureName, Rest);
+copy_from_mnesia_to_khepri(
+  FeatureName, [rabbit_durable_queue = Table | Rest]) ->
+    Fun = fun rabbit_amqqueue:mnesia_write_durable_queue_to_khepri/1,
+    do_copy_from_mnesia_to_khepri(FeatureName, Table, Fun),
+    copy_from_mnesia_to_khepri(FeatureName, Rest);
+copy_from_mnesia_to_khepri(
+  FeatureName, [rabbit_exchange = Table | Rest]) ->
+    Fun = fun rabbit_exchange:mnesia_write_exchange_to_khepri/1,
+    do_copy_from_mnesia_to_khepri(FeatureName, Table, Fun),
+    copy_from_mnesia_to_khepri(FeatureName, Rest);
+copy_from_mnesia_to_khepri(
+  FeatureName, [rabbit_durable_exchange = Table | Rest]) ->
+    Fun = fun rabbit_exchange:mnesia_write_durable_exchange_to_khepri/1,
+    do_copy_from_mnesia_to_khepri(FeatureName, Table, Fun),
+    copy_from_mnesia_to_khepri(FeatureName, Rest);
+copy_from_mnesia_to_khepri(
+  FeatureName, [rabbit_exchange_serial = Table | Rest]) ->
+    Fun = fun rabbit_exchange:mnesia_write_exchange_serial_to_khepri/1,
+    do_copy_from_mnesia_to_khepri(FeatureName, Table, Fun),
+    copy_from_mnesia_to_khepri(FeatureName, Rest);
 copy_from_mnesia_to_khepri(_, []) ->
     ok.
 
