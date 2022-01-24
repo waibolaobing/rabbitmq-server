@@ -67,6 +67,9 @@
 
 -export([deactivate_limit_all/2]).
 
+-export([mnesia_write_queue_to_khepri/1, mnesia_write_durable_queue_to_khepri/1,
+         mnesia_delete_queue_to_khepri/1, mnesia_delete_durable_queue_to_khepri/1]).
+
 %% internal
 -export([internal_declare/2, internal_delete/2, run_backing_queue/3,
          set_ram_duration_target/2, set_maximum_since_use/2,
@@ -2398,3 +2401,31 @@ mnesia_table_to_khepri_path(rabbit_durable_queue, QName) ->
     khepri_durable_queue_path(QName);
 mnesia_table_to_khepri_path(rabbit_queue, QName) ->
     khepri_queue_path(QName).
+
+mnesia_write_queue_to_khepri(Q) ->
+    Path = khepri_queue_path(amqqueue:get_name(Q)),
+    case rabbit_khepri:insert(Path, Q) of
+        ok    -> ok;
+        Error -> throw(Error)
+    end.
+
+mnesia_write_durable_queue_to_khepri(Q) ->
+    Path = khepri_durable_queue_path(amqqueue:get_name(Q)),
+    case rabbit_khepri:insert(Path, Q) of
+        ok    -> ok;
+        Error -> throw(Error)
+    end.
+
+mnesia_delete_queue_to_khepri(Q) ->
+    Path = khepri_queue_path(amqqueue:get_name(Q)),
+    case rabbit_khepri:delete(Path) of
+        ok    -> ok;
+        Error -> throw(Error)
+    end.
+
+mnesia_delete_durable_queue_to_khepri(Q) ->
+    Path = khepri_queue_path(amqqueue:get_name(Q)),
+    case rabbit_khepri:delete(Path) of
+        ok    -> ok;
+        Error -> throw(Error)
+    end.

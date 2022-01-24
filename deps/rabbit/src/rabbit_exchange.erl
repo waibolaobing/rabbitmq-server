@@ -20,6 +20,9 @@
 %% these must be run inside a mnesia tx
 -export([maybe_auto_delete/2, serial_in_mnesia/1, serial_in_khepri/1, peek_serial/1, update/2]).
 -export([peek_serial_in_mnesia/1, peek_serial_in_khepri/1]).
+-export([mnesia_write_exchange_to_khepri/1, mnesia_write_durable_exchange_to_khepri/1,
+         mnesia_write_exchange_serial_to_khepri/1, mnesia_delete_exchange_to_khepri/1,
+         mnesia_delete_durable_exchange_to_khepri/1, mnesia_delete_exchange_serial_to_khepri/1]).
 
 %%----------------------------------------------------------------------------
 
@@ -874,3 +877,48 @@ khepri_durable_exchange_path(#resource{virtual_host = VHost, name = Name}) ->
 
 khepri_exchange_serial_path(#resource{virtual_host = VHost, name = Name}) ->
     [?MODULE, exchange_serials, VHost, Name].
+
+mnesia_write_exchange_to_khepri(
+  #exchange{name = Resource} = Exchange) ->
+    Path = khepri_exchange_path(Resource),
+    case rabbit_khepri:insert(Path, Exchange) of
+        ok    -> ok;
+        Error -> throw(Error)
+    end.
+
+mnesia_write_durable_exchange_to_khepri(
+  #exchange{name = Resource} = Exchange) ->
+    Path = khepri_durable_exchange_path(Resource),
+    case rabbit_khepri:insert(Path, Exchange) of
+        ok    -> ok;
+        Error -> throw(Error)
+    end.
+
+mnesia_write_exchange_serial_to_khepri(
+  #exchange{name = Resource} = Exchange) ->
+    Path = khepri_exchange_serial_path(Resource),
+    case rabbit_khepri:insert(Path, Exchange) of
+        ok    -> ok;
+        Error -> throw(Error)
+    end.
+
+mnesia_delete_exchange_to_khepri(#exchange{name = Resource}) ->
+    Path = khepri_exchange_path(Resource),
+    case rabbit_khepri:delete(Path) of
+        ok    -> ok;
+        Error -> throw(Error)
+    end.
+
+mnesia_delete_durable_exchange_to_khepri(#exchange{name = Resource}) ->
+    Path = khepri_durable_exchange_path(Resource),
+    case rabbit_khepri:delete(Path) of
+        ok    -> ok;
+        Error -> throw(Error)
+    end.
+
+mnesia_delete_exchange_serial_to_khepri(#exchange{name = Resource}) ->
+    Path = khepri_exchange_serial_path(Resource),
+    case rabbit_khepri:delete(Path) of
+        ok    -> ok;
+        Error -> throw(Error)
+    end.
