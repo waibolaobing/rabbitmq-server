@@ -16,9 +16,10 @@ define PROJECT_APP_EXTRA_KEYS
 endef
 
 LOCAL_DEPS = compiler crypto public_key sasl ssl syntax_tools tools xmerl
-DEPS = jsx recon credentials_obfuscation
+DEPS = jsx recon credentials_obfuscation khepri
 
 dep_credentials_obfuscation = git https://github.com/rabbitmq/credentials-obfuscation.git  master
+dep_khepri = git https://github.com/rabbitmq/khepri.git more-instructions
 
 # FIXME: Use erlang.mk patched for RabbitMQ, while waiting for PRs to be
 # reviewed and merged.

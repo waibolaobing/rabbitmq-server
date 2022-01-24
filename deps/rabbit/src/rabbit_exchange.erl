@@ -22,7 +22,10 @@
 -export([peek_serial_in_mnesia/1, peek_serial_in_khepri/1]).
 -export([mnesia_write_exchange_to_khepri/1, mnesia_write_durable_exchange_to_khepri/1,
          mnesia_write_exchange_serial_to_khepri/1, mnesia_delete_exchange_to_khepri/1,
-         mnesia_delete_durable_exchange_to_khepri/1, mnesia_delete_exchange_serial_to_khepri/1]).
+         mnesia_delete_durable_exchange_to_khepri/1, mnesia_delete_exchange_serial_to_khepri/1,
+         clear_exchange_data_in_khepri/0, clear_durable_exchange_data_in_khepri/0,
+         clear_exchange_serial_data_in_khepri/0]).
+-export([list_in_khepri_tx/1, update_in_mnesia/2, update_in_khepri/2]).
 
 %%----------------------------------------------------------------------------
 
@@ -57,7 +60,7 @@ recover(VHost) ->
                       end,
                       rabbit_durable_exchange)
            end,
-           fun() -> rabbit_misc:table_filter_in_khepi(
+           fun() -> rabbit_misc:table_filter_in_khepri(
                       fun (#exchange{name = XName}) ->
                               XName#resource.virtual_host =:= VHost andalso
                                   lookup_as_list_in_khepri(XName) =:= []
@@ -432,9 +435,14 @@ list_in_mnesia(VHostPath) ->
       end).
 
 list_in_khepri(VHostPath) ->
-    Path = khepri_exchanges_path() ++ [VHostPath],
-    {ok, Map} = rabbit_khepri:match(Path),
-    maps:fold(fun(_, #{data := Q}, Acc) -> [Q | Acc] end, [], Map).
+    Path = khepri_exchanges_path() ++ [VHostPath, ?STAR_STAR],
+    {ok, Map} = rabbit_khepri:match_and_get_data(Path),
+    maps:fold(fun(_, X, Acc) -> [X | Acc] end, [], Map).
+
+list_in_khepri_tx(VHostPath) ->
+    Path = khepri_exchanges_path() ++ [VHostPath, ?STAR_STAR],
+    {ok, Map} = rabbit_khepri:tx_match_and_get_data(Path),
+    maps:fold(fun(_, X, Acc) -> [X | Acc] end, [], Map).
 
 -spec lookup_scratch(name(), atom()) ->
                                rabbit_types:ok(term()) |
@@ -875,6 +883,9 @@ khepri_durable_exchanges_path() ->
 khepri_durable_exchange_path(#resource{virtual_host = VHost, name = Name}) ->
     [?MODULE, durable_exchanges, VHost, Name].
 
+khepri_exchange_serials_path() ->
+    [?MODULE, exchanges_serials].
+
 khepri_exchange_serial_path(#resource{virtual_host = VHost, name = Name}) ->
     [?MODULE, exchange_serials, VHost, Name].
 
@@ -918,6 +929,27 @@ mnesia_delete_durable_exchange_to_khepri(#exchange{name = Resource}) ->
 
 mnesia_delete_exchange_serial_to_khepri(#exchange{name = Resource}) ->
     Path = khepri_exchange_serial_path(Resource),
+    case rabbit_khepri:delete(Path) of
+        ok    -> ok;
+        Error -> throw(Error)
+    end.
+
+clear_exchange_data_in_khepri() ->
+    Path = khepri_exchanges_path(),
+    case rabbit_khepri:delete(Path) of
+        ok    -> ok;
+        Error -> throw(Error)
+    end.
+
+clear_durable_exchange_data_in_khepri() ->
+    Path = khepri_durable_exchanges_path(),
+    case rabbit_khepri:delete(Path) of
+        ok    -> ok;
+        Error -> throw(Error)
+    end.
+
+clear_exchange_serial_data_in_khepri() ->
+    Path = khepri_exchange_serials_path(),
     case rabbit_khepri:delete(Path) of
         ok    -> ok;
         Error -> throw(Error)

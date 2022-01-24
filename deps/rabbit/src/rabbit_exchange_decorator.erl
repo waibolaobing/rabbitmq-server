@@ -9,7 +9,7 @@
 
 -include_lib("rabbit_common/include/rabbit.hrl").
 
--export([select/2, set/1]).
+-export([select/2, set/1, set/2, list/0]).
 
 -behaviour(rabbit_registry_class).
 
@@ -80,11 +80,14 @@ filter(Modules) ->
     [M || M <- Modules, code:which(M) =/= non_existing].
 
 set(X) ->
+    set(X, list()).
+
+set(X, List) ->
     Decs = lists:foldl(fun (D, {Route, NoRoute}) ->
                                ActiveFor = D:active_for(X),
                                {cons_if_eq(all,     ActiveFor, D, Route),
                                 cons_if_eq(noroute, ActiveFor, D, NoRoute)}
-                       end, {[], []}, list()),
+                       end, {[], []}, List),
     X#exchange{decorators = Decs}.
 
 list() -> [M || {_, M} <- rabbit_registry:lookup_all(exchange_decorator)].

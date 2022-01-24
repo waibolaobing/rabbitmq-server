@@ -499,6 +499,26 @@ clear_data_from_previous_attempt(
   FeatureName, [rabbit_runtime_parameters | Rest]) ->
     ok = rabbit_runtime_parameters:clear_data_in_khepri(),
     clear_data_from_previous_attempt(FeatureName, Rest);
+clear_data_from_previous_attempt(
+  FeatureName, [rabbit_exchange | Rest]) ->
+    ok = rabbit_exchange:clear_exchange_data_in_khepri(),
+    clear_data_from_previous_attempt(FeatureName, Rest);
+clear_data_from_previous_attempt(
+  FeatureName, [rabbit_durable_exchange | Rest]) ->
+    ok = rabbit_exchange:clear_durable_exchange_data_in_khepri(),
+    clear_data_from_previous_attempt(FeatureName, Rest);
+clear_data_from_previous_attempt(
+  FeatureName, [rabbit_exchange_serial | Rest]) ->
+    ok = rabbit_exchange:clear_exchange_serial_data_in_khepri(),
+    clear_data_from_previous_attempt(FeatureName, Rest);
+clear_data_from_previous_attempt(
+  FeatureName, [rabbit_queue | Rest]) ->
+    ok = rabbit_amqqueue:clear_queue_data_in_khepri(),
+    clear_data_from_previous_attempt(FeatureName, Rest);
+clear_data_from_previous_attempt(
+  FeatureName, [rabbit_durable_queue | Rest]) ->
+    ok = rabbit_amqqueue:clear_durable_queue_data_in_khepri(),
+    clear_data_from_previous_attempt(FeatureName, Rest);
 clear_data_from_previous_attempt(_, []) ->
     ok.
 
