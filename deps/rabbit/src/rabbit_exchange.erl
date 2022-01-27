@@ -60,7 +60,7 @@ recover(VHost) ->
                       end,
                       rabbit_durable_exchange)
            end,
-           fun() -> rabbit_misc:table_filter_in_khepri(
+           fun() -> rabbit_khepri_misc:table_filter_in_khepri(
                       fun (#exchange{name = XName}) ->
                               XName#resource.virtual_host =:= VHost andalso
                                   lookup_as_list_in_khepri(XName) =:= []
@@ -187,7 +187,7 @@ declare(XName, Type, Durable, AutoDelete, Internal, Args, Username) ->
                             end)
                   end,
                   fun() ->
-                          rabbit_misc:execute_khepri_transaction(
+                          rabbit_khepri_misc:execute_khepri_transaction(
                             fun() ->
                                     case lookup_as_list_in_khepri(XName) of
                                         [] ->
@@ -690,7 +690,7 @@ call_with_exchange_in_mnesia(XName, Fun) ->
       end).
 
 call_with_exchange_in_khepri(XName, Fun) ->
-    rabbit_misc:execute_khepri_tx_with_tail(
+    rabbit_khepri_misc:execute_khepri_tx_with_tail(
       fun () -> case lookup_as_list_in_khepri(XName) of
                     []  -> rabbit_misc:const({error, not_found});
                     [X] -> Fun(X)

@@ -9,7 +9,6 @@
 
 -ignore_xref([{maps, get, 2}]).
 
--include_lib("khepri/include/khepri.hrl").
 -include("rabbit.hrl").
 -include("rabbit_framing.hrl").
 -include("rabbit_misc.hrl").
@@ -32,13 +31,11 @@
          filter_exit_map/2]).
 -export([execute_mnesia_transaction/1]).
 -export([execute_mnesia_transaction/2]).
--export([execute_khepri_transaction/2]).
 -export([execute_mnesia_tx_with_tail/1]).
--export([execute_khepri_tx_with_tail/1]).
 -export([ensure_ok/2]).
 -export([tcp_name/3, format_inet_error/1]).
 -export([upmap/2, map_in_order/2, utf8_safe/1]).
--export([table_filter/3, table_filter_in_khepri/3]).
+-export([table_filter/3]).
 -export([dirty_read_all/1, dirty_foreach_key/2, dirty_dump_log/1]).
 -export([format/2, format_many/1, format_stderr/2]).
 -export([unfold/2, ceil/1, queue_fold/3]).
@@ -589,13 +586,6 @@ execute_mnesia_tx_with_tail(TxFun) ->
                  TailFun()
     end.
 
-execute_khepri_tx_with_tail(TxFun) ->
-    case khepri_tx:is_transaction() of
-        true  -> rabbit_khepri:transaction(TxFun);
-        false -> TailFun = rabbit_khepri:transaction(TxFun),
-                 TailFun()
-    end.
-
 ensure_ok(ok, _) -> ok;
 ensure_ok({error, Reason}, ErrorTag) -> throw({error, {ErrorTag, Reason}}).
 
@@ -668,39 +658,6 @@ table_filter(Pred, PrePostCommitFun, TableName) ->
                   true  -> [E | Acc]
               end
       end, [], dirty_read_all(TableName)).
-
-%% TODO should rabbit table have a conversion of mnesia_table -> khepri_path?
-table_filter_in_khepri(Pred, PrePostCommitFun, Path) ->
-    lists:foldl(
-      fun (E, Acc) ->
-              case execute_khepri_transaction(
-                     fun () -> khepri_tx:find(Path, #if_data_matches{pattern = E}) =/= []
-                                   andalso Pred(E) end,
-                     fun (false, _Tx) -> false;
-                         (true,   Tx) -> PrePostCommitFun(E, Tx), true
-                     end) of
-                  false -> Acc;
-                  true  -> [E | Acc]
-              end
-      end, [], khepri_read_all(Path)).
-
-khepri_read_all(Path) ->
-    case rabbit_khepri:list_child_data(Path) of
-        {ok, Map} -> maps:values(Map);
-        _         -> []
-    end.
-
-execute_khepri_transaction(TxFun, PrePostCommitFun) ->
-    case khepri_tx:is_transaction() of
-        true  -> throw(unexpected_transaction);
-        false -> ok
-    end,
-    PrePostCommitFun(rabbit_khepri:transaction(
-                       fun () ->
-                               Result = TxFun(),
-                               PrePostCommitFun(Result, true),
-                               Result
-                       end), false).
 
 dirty_read_all(TableName) ->
     mnesia:dirty_select(TableName, [{'$1',[],['$1']}]).
