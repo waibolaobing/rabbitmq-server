@@ -114,8 +114,20 @@ is_recoverable(Q) when ?is_amqqueue(Q) ->
     %% record if it is a mirrored queue (such info is now obtained from
     %% the policy). Thus, we must check if the local pid is alive
     %% - if the record is present - in order to restart.
-    (mnesia:read(rabbit_queue, amqqueue:get_name(Q), read) =:= []
+    (lookup_queue(Q)
      orelse not rabbit_mnesia:is_process_alive(amqqueue:get_pid(Q))).
+
+lookup_queue(Q) ->
+    rabbit_khepri:try_mnesia_or_khepri(
+      fun() ->
+              mnesia:read(rabbit_queue, amqqueue:get_name(Q), read) =:= []
+      end,
+      fun() ->
+              case rabbit_amqqueue:lookup_in_khepri(rabbit_queue, amqqueue:get_name(Q)) of
+                  {ok, _} -> false;
+                  _ -> true
+              end
+      end).
 
 recover(VHost, Queues) ->
     {ok, BQ} = application:get_env(rabbit, backing_queue_module),

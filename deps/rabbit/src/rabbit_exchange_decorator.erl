@@ -9,7 +9,7 @@
 
 -include_lib("rabbit_common/include/rabbit.hrl").
 
--export([select/2, set/1, set/2, list/0]).
+-export([select/2, set/1, active/1]).
 
 -behaviour(rabbit_registry_class).
 
@@ -80,15 +80,21 @@ filter(Modules) ->
     [M || M <- Modules, code:which(M) =/= non_existing].
 
 set(X) ->
-    set(X, list()).
-
-set(X, List) ->
     Decs = lists:foldl(fun (D, {Route, NoRoute}) ->
                                ActiveFor = D:active_for(X),
                                {cons_if_eq(all,     ActiveFor, D, Route),
                                 cons_if_eq(noroute, ActiveFor, D, NoRoute)}
-                       end, {[], []}, List),
+                       end, {[], []}, list()),
     X#exchange{decorators = Decs}.
+
+%% TODO The list of decorators can probably be a parameter, to avoid multiple queries
+%% when we're updating many exchanges
+active(X) ->
+    lists:foldl(fun (D, {Route, NoRoute}) ->
+                        ActiveFor = D:active_for(X),
+                        {cons_if_eq(all,     ActiveFor, D, Route),
+                         cons_if_eq(noroute, ActiveFor, D, NoRoute)}
+                end, {[], []}, list()).
 
 list() -> [M || {_, M} <- rabbit_registry:lookup_all(exchange_decorator)].
 

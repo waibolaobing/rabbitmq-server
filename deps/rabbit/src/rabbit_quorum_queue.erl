@@ -286,25 +286,23 @@ local_or_remote_handler(ChPid, Module, Function, Args) ->
     end.
 
 become_leader(QName, Name) ->
+    Node = node(),
     Fun = fun (Q1) ->
                   amqqueue:set_state(
-                    amqqueue:set_pid(Q1, {Name, node()}),
+                    amqqueue:set_pid(Q1, {Name, Node}),
                     live)
           end,
     %% as this function is called synchronously when a ra node becomes leader
     %% we need to ensure there is no chance of blocking as else the ra node
     %% may not be able to establish it's leadership
     spawn(fun() ->
-                  rabbit_misc:execute_mnesia_transaction(
-                    fun() ->
-                            rabbit_amqqueue:update(QName, Fun)
-                    end),
+                  rabbit_amqqueue:update_in_tx(QName, Fun),
                   case rabbit_amqqueue:lookup(QName) of
                       {ok, Q0} when ?is_amqqueue(Q0) ->
                           Nodes = get_nodes(Q0),
-                          [rpc:call(Node, ?MODULE, rpc_delete_metrics,
+                          [rpc:call(N, ?MODULE, rpc_delete_metrics,
                                     [QName], ?RPC_TIMEOUT)
-                           || Node <- Nodes, Node =/= node()];
+                           || N <- Nodes, N =/= node()];
                       _ ->
                           ok
                   end
@@ -504,10 +502,7 @@ repair_amqqueue_nodes(Q0) ->
                           TS = TS0#{nodes => RaNodes},
                           amqqueue:set_type_state(Q, TS)
                   end,
-            rabbit_misc:execute_mnesia_transaction(
-              fun() ->
-                      rabbit_amqqueue:update(QName, Fun)
-              end),
+            rabbit_amqqueue:update_in_tx(QName, Fun),
             repaired
     end.
 
@@ -1058,8 +1053,7 @@ add_member(Q, Node, Timeout) when ?amqqueue_is_quorum(Q) ->
                                              end),
                                   amqqueue:set_pid(Q2, Leader)
                           end,
-                    rabbit_misc:execute_mnesia_transaction(
-                      fun() -> rabbit_amqqueue:update(QName, Fun) end),
+                    rabbit_amqqueue:update_in_tx(QName, Fun),
                     ok;
                 {timeout, _} ->
                     _ = ra:force_delete_server(?RA_SYSTEM, ServerId),
@@ -1111,8 +1105,8 @@ delete_member(Q, Node) when ?amqqueue_is_quorum(Q) ->
                                             Ts#{nodes => lists:delete(Node, Nodes)}
                                     end)
                           end,
-                    rabbit_misc:execute_mnesia_transaction(
-                      fun() -> rabbit_amqqueue:update(QName, Fun) end),
+                    %% TODO
+                    rabbit_amqqueue:update_in_tx(QName, Fun),
                     case ra:force_delete_server(?RA_SYSTEM, ServerId) of
                         ok ->
                             ok;

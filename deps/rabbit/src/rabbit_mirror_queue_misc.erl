@@ -403,7 +403,7 @@ log_warning(QName, Fmt, Args) ->
           amqqueue:amqqueue().
 
 store_updated_slaves(Q0) when ?is_amqqueue(Q0) ->
-    Decorators = rabbit_queue_decorator:list(),
+    Decorators = rabbit_queue_decorator:active(Q0),
     rabbit_khepri:try_mnesia_or_khepri(
       fun() ->
               store_updated_slaves_in_mnesia(Q0)
@@ -446,7 +446,8 @@ store_updated_slaves_in_khepri(Q0, Decorators) ->
     %% The amqqueue was read from this transaction, no need to handle
     %% migration.
     rabbit_amqqueue:store_queue_in_khepri(Q3),
-    rabbit_amqqueue:store_queue_ram_in_khepri(Q3, Decorators),
+    Q4 = amqqueue:set_decorators(Q3, Decorators),
+    rabbit_amqqueue:store_queue_ram_in_khepri(Q4),
     %% Wake it up so that we emit a stats event
     %% TODO check this notification in khepri tx!!! It ends up calling the queue type,
     %% it could do anything. I think it should be a side-effect
