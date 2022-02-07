@@ -187,7 +187,7 @@ matches(#resource{name = Name, kind = Kind, virtual_host = VHost} = Resource, Po
         match =:= re:run(Name, pget(pattern, Policy), [{capture, none}]) andalso
         VHost =:= pget(vhost, Policy);
 matches(Q, Policy) ->
-    #resource{name = Name, kind = Kind, virtual_host = VHost} = Resource = amqqueue:get_name(Q),
+    #resource{name = Name, kind = Kind, virtual_host = VHost} = amqqueue:get_name(Q),
     matches_type(Kind, pget('apply-to', Policy)) andalso
         is_applicable(Q, pget(definition, Policy)) andalso
         match =:= re:run(Name, pget(pattern, Policy), [{capture, none}]) andalso
@@ -591,7 +591,6 @@ get_updated_exchange(X = #exchange{name = XName,
     end.
 
 get_updated_queue(Q0, Policies, OpPolicies) when ?is_amqqueue(Q0) ->
-    QName = amqqueue:get_name(Q0),
     OldPolicy = amqqueue:get_policy(Q0),
     OldOpPolicy = amqqueue:get_operator_policy(Q0),
     case {match(Q0, Policies), match(Q0, OpPolicies)} of
