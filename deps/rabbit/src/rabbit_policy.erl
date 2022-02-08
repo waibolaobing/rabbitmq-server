@@ -544,29 +544,40 @@ update_queue(Q0, Policies, OpPolicies) when ?is_amqqueue(Q0) ->
 update_matched_objects_in_khepri(VHost) ->
     case rabbit_khepri:transaction(
            fun() ->
-                   {Policies, OpPolicies} = catch {list0_in_khepri(VHost, fun ident/1),
-                                                   list0_op_in_khepri(VHost, fun ident/1)},
-                   Exchanges = rabbit_exchange:list_in_khepri_tx(VHost),
-                   Queues = rabbit_amqqueue:list_in_khepri_tx(VHost),
-                   {Policies, OpPolicies, Exchanges, Queues}
+                   case (catch {list0_in_khepri(VHost, fun ident/1),
+                                list0_op_in_khepri(VHost, fun ident/1)}) of
+                       {'EXIT', _} = Err ->
+                           {error, Err};
+                       {Policies, OpPolicies} ->
+                           Exchanges = rabbit_exchange:list_in_khepri_tx(VHost),
+                           Queues = rabbit_amqqueue:list_in_khepri_tx(VHost),
+                           {ok, #{policies => Policies,
+                                  op_policies => OpPolicies,
+                                  exchanges => Exchanges,
+                                  queues => Queues}}
+                   end
            end, ro) of
-        {'EXIT', {throw, {error, {no_such_vhost, _}}}, _, _} ->
+        {error, {'EXIT', {throw, {error, {no_such_vhost, _}}}}} ->
             {[], []}; %% [2]
-        {'EXIT', Exit, _, _} ->
+        {error, {'EXIT', Exit}} ->
             exit(Exit);
-        {Policies, OpPolicies, Exchanges0, Queues0} ->
+        {ok, #{policies := Policies,
+               op_policies := OpPolicies,
+               exchanges := Exchanges0,
+               queues := Queues0}} ->
             Exchanges = [get_updated_exchange(X, Policies, OpPolicies) || X <- Exchanges0],
             Queues = [get_updated_queue(Q, Policies, OpPolicies) || Q <- Queues0],
             rabbit_khepri:transaction(
               fun() ->
-                      [update_exchange(X, NewPolicy, NewOpPolicy, Decorators) ||
-                          {X, NewPolicy, NewOpPolicy, Decorators} <- Exchanges],
-                      [update_queue(Q, NewPolicy, NewOpPolicy, Decorators) ||
-                          {Q, NewPolicy, NewOpPolicy, Decorators} <- Queues]
+                      {[update_exchange(Map) || Map <- Exchanges, is_map(Map)],
+                       [update_queue(Map) || Map <- Queues, is_map(Map)]}
               end)
     end.
 
-update_exchange(X = #exchange{name = XName}, NewPolicy, NewOpPolicy, Decorators) ->
+update_exchange(#{exchange := X = #exchange{name = XName},
+                  policy := NewPolicy,
+                  op_policy := NewOpPolicy,
+                  decorators := Decorators}) ->
     NewExchange = rabbit_exchange:update_in_khepri(
                     XName,
                     fun(X0) ->
@@ -587,7 +598,10 @@ get_updated_exchange(X = #exchange{name = XName,
         {OldPolicy, OldOpPolicy} -> no_change;
         {NewPolicy, NewOpPolicy} ->
             Decorators = rabbit_exchange_decorator:active(X),
-            {X, NewPolicy, NewOpPolicy, Decorators}
+            #{exchange => X,
+              policy => NewPolicy,
+              op_policy => NewOpPolicy,
+              decorators => Decorators}
     end.
 
 get_updated_queue(Q0, Policies, OpPolicies) when ?is_amqqueue(Q0) ->
@@ -597,10 +611,13 @@ get_updated_queue(Q0, Policies, OpPolicies) when ?is_amqqueue(Q0) ->
         {OldPolicy, OldOpPolicy} -> no_change;
         {NewPolicy, NewOpPolicy} ->
             Decorators = rabbit_queue_decorator:active(Q0),
-            {Q0, NewPolicy, NewOpPolicy, Decorators}
+            #{queue => Q0,
+              policy => NewPolicy,
+              op_policy => NewOpPolicy,
+              decorators => Decorators}
     end.
 
-update_queue(Q0, NewPolicy, NewOpPolicy, Decorators) ->
+update_queue(#{queue := Q0, policy := NewPolicy, op_policy := NewOpPolicy, decorators := Decorators}) ->
     QName = amqqueue:get_name(Q0),
     F = fun (QFun0) ->
                 QFun1 = amqqueue:set_policy(QFun0, NewPolicy),
@@ -650,6 +667,9 @@ priority_comparator(A, B) -> pget(priority, A) >= pget(priority, B).
 
 is_applicable(#resource{kind = queue} = Resource, Policy) ->
     rabbit_amqqueue:is_policy_applicable(Resource, rabbit_data_coercion:to_list(Policy));
+is_applicable(Queue, Policy) when ?is_amqqueue(Queue) ->
+    QName = amqqueue:get_name(Queue),
+    rabbit_amqqueue:is_policy_applicable(QName, rabbit_data_coercion:to_list(Policy));
 is_applicable(_, _) ->
     true.
 

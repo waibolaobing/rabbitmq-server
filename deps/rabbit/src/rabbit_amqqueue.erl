@@ -52,8 +52,7 @@
 -export([delete_crashed/1,
          delete_crashed/2,
          delete_crashed_internal/2]).
--export([update_in_tx/2, lookup_durable_queue/1, list_in_khepri_tx/1,
-         is_policy_applicable_in_mnesia/2, is_policy_applicable_in_khepri/2]).
+-export([update_in_tx/2, lookup_durable_queue/1, list_in_khepri_tx/1]).
 -export([list_in_mnesia/1, list_in_khepri/1, list_table/1, update_in_mnesia/2, update_in_khepri/2]).
 
 -export([pid_of/1, pid_of/2]).
@@ -588,22 +587,8 @@ policy_changed(Q1, Q2) ->
 is_policy_applicable(Q, Policy) when ?is_amqqueue(Q) ->
     rabbit_queue_type:is_policy_applicable(Q, Policy);
 is_policy_applicable(QName, Policy) ->
-    rabbit_khepri:try_mnesia_or_khepri(
-      fun() -> is_policy_applicable_in_mnesia(QName, Policy) end,
-      fun() -> is_policy_applicable_in_khepri(QName, Policy) end).
-
-is_policy_applicable_in_mnesia(QName, Policy) ->
     case lookup(QName) of
         {ok, Q} ->
-            rabbit_queue_type:is_policy_applicable(Q, Policy);
-        _ ->
-            %% Defaults to previous behaviour. Apply always
-            true
-    end.
-
-is_policy_applicable_in_khepri(QName, Policy) ->
-    case lookup_as_list_in_khepri(rabbit_queue, QName) of
-        [Q] ->
             rabbit_queue_type:is_policy_applicable(Q, Policy);
         _ ->
             %% Defaults to previous behaviour. Apply always
