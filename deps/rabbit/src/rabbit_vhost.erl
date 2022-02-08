@@ -330,10 +330,11 @@ delete(VHost, ActingUser) ->
      end || Q <- rabbit_amqqueue:list(VHost)],
     [assert_benign(rabbit_exchange:delete(Name, false, ActingUser), ActingUser) ||
         #exchange{name = Name} <- rabbit_exchange:list(VHost)],
-    With = with(VHost, fun () -> internal_delete(VHost, ActingUser) end),
+    WithMnesia = with(VHost, fun () -> internal_delete_in_mnesia(VHost, ActingUser) end),
+    WithKhepri = with(VHost, fun () -> internal_delete_in_khepri(VHost, ActingUser) end),
     Funs = rabbit_khepri:try_mnesia_or_khepri(
-             fun() -> rabbit_misc:execute_mnesia_transaction(With) end,
-             fun() -> rabbit_khepri:transaction(With) end),
+             fun() -> rabbit_misc:execute_mnesia_transaction(WithMnesia) end,
+             fun() -> rabbit_khepri:transaction(WithKhepri) end),
     ok = rabbit_event:notify(vhost_deleted, [{name, VHost},
                                              {user_who_performed_action, ActingUser}]),
     [case Fun() of
@@ -461,10 +462,8 @@ assert_benign({error, {absent, Q, _}}, ActingUser) ->
     QName = amqqueue:get_name(Q),
     rabbit_amqqueue:internal_delete(QName, ActingUser).
 
-internal_delete(VHost, ActingUser) ->
-    _ = rabbit_khepri:try_mnesia_or_khepri(
-          fun() -> internal_delete_in_mnesia_part1(VHost, ActingUser) end,
-          fun() -> ok end),
+internal_delete_in_mnesia(VHost, ActingUser) ->
+    _ = internal_delete_in_mnesia_part1(VHost, ActingUser),
     %% FIXME: Use keep_until conditions to maintain atomicity in Khepri.
     Fs1 = [rabbit_runtime_parameters:clear(VHost,
                                            proplists:get_value(component, Info),
@@ -473,9 +472,19 @@ internal_delete(VHost, ActingUser) ->
      || Info <- rabbit_runtime_parameters:list(VHost)],
     Fs2 = [rabbit_policy:delete(VHost, proplists:get_value(name, Info), ActingUser)
            || Info <- rabbit_policy:list(VHost)],
-    _ = rabbit_khepri:try_mnesia_or_khepri(
-          fun() -> internal_delete_in_mnesia_part2(VHost) end,
-          fun() -> internal_delete_in_khepri(VHost) end),
+    _ = internal_delete_in_mnesia_part2(VHost),
+    Fs1 ++ Fs2.
+
+internal_delete_in_khepri(VHost, ActingUser) ->
+    %% FIXME: Use keep_until conditions to maintain atomicity in Khepri.
+    Fs1 = [rabbit_runtime_parameters:clear(VHost,
+                                           proplists:get_value(component, Info),
+                                           proplists:get_value(name, Info),
+                                           ActingUser)
+     || Info <- rabbit_runtime_parameters:list(VHost)],
+    Fs2 = [rabbit_policy:delete(VHost, proplists:get_value(name, Info), ActingUser)
+           || Info <- rabbit_policy:list(VHost)],
+    _ = internal_delete_in_khepri(VHost),
     Fs1 ++ Fs2.
 
 internal_delete_in_mnesia_part1(VHost, ActingUser) ->
