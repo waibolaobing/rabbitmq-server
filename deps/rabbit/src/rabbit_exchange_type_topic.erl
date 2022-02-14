@@ -47,10 +47,10 @@ validate_binding(_X, _B) -> ok.
 create(_Tx, _X) -> ok.
 
 delete(transaction, #exchange{name = X}, _Bs) ->
-    trie_remove_all_nodes(X),
-    trie_remove_all_edges(X),
-    trie_remove_all_bindings(X),
-    ok;
+    rabbit_khepri:try_mnesia_or_khepri(
+      fun() -> delete_in_mnesia(X) end,
+      %% TODO delete_in_khepri(X)
+      fun() -> ok end);
 delete(none, _Exchange, _Bs) ->
     ok.
 
@@ -62,6 +62,22 @@ add_binding(none, _Exchange, _Binding) ->
     ok.
 
 remove_bindings(transaction, _X, Bs) ->
+    rabbit_khepri:try_mnesia_or_khepri(
+      fun() ->
+              remove_bindings_in_mnesia(Bs)
+      end,
+      fun() ->
+              %% TODO remove_bindings_in_khepri
+              ok
+      end);
+remove_bindings(none, _X, _Bs) ->
+    ok.
+
+assert_args_equivalence(X, Args) ->
+    rabbit_exchange:assert_args_equivalence(X, Args).
+
+%%----------------------------------------------------------------------------
+remove_bindings_in_mnesia(Bs) ->
     %% See rabbit_binding:lock_route_tables for the rationale for
     %% taking table locks.
     case Bs of
@@ -80,14 +96,13 @@ remove_bindings(transaction, _X, Bs) ->
              %% That's unexpected, but shouldn't be a problem.
              ok
      end ||  #binding{source = X, key = K, destination = D, args = Args} <- Bs],
-    ok;
-remove_bindings(none, _X, _Bs) ->
     ok.
 
-assert_args_equivalence(X, Args) ->
-    rabbit_exchange:assert_args_equivalence(X, Args).
-
-%%----------------------------------------------------------------------------
+delete_in_mnesia(X) ->
+    trie_remove_all_nodes(X),
+    trie_remove_all_edges(X),
+    trie_remove_all_bindings(X),
+    ok.
 
 internal_add_binding(#binding{source = X, key = K, destination = D,
                               args = Args}) ->

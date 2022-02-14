@@ -13,12 +13,13 @@
          delete_immediately/1, delete_exclusive/2, delete/4, purge/1,
          forget_all_durable/1]).
 -export([pseudo_queue/2, pseudo_queue/3, immutable/1]).
--export([lookup/1, lookup_many/1, not_found_or_absent/1, not_found_or_absent_dirty/1,
+-export([lookup/1, lookup_many/1, not_found_or_absent_dirty/1,
          with/2, with/3, with_or_die/2,
          assert_equivalence/5,
          check_exclusive_access/2, with_exclusive_access_or_die/3,
          stat/1, deliver/2,
          requeue/3, ack/3, reject/4]).
+-export([not_found_or_absent_in_mnesia/1, not_found_or_absent_in_khepri/1]).
 -export([not_found/1, absent/2]).
 -export([list/0, list/1, info_keys/0, info/1, info/2, info_all/1, info_all/2,
          emit_info_all/5, list_local/1, info_local/1,
@@ -79,7 +80,7 @@
          set_ram_duration_target/2, set_maximum_since_use/2,
          emit_consumers_local/3, internal_delete/3]).
 
-%% For use by classic queue mirroring modules
+%% For use by classic queue mirroring modules and rabbit_binding
 -export([lookup_as_list_in_khepri/2]).
 -export([store_queue_in_khepri/1, store_queue_ram_in_khepri/1, store_queue_in_khepri/2]).
 
@@ -656,12 +657,7 @@ lookup_durable_queue(Name) ->
 lookup_many(Names) when is_list(Names) ->
     lookup(Names).
 
--spec not_found_or_absent(name()) -> not_found_or_absent().
-
-not_found_or_absent(Name) ->
-    rabbit_khepri:try_mnesia_or_khepri(
-      fun() -> not_found_or_absent_in_mnesia(Name) end,
-      fun() -> not_found_or_absent_in_khepri(Name) end).
+-spec not_found_or_absent_in_mnesia(name()) -> not_found_or_absent().
 
 not_found_or_absent_in_mnesia(Name) ->
     %% NB: we assume that the caller has already performed a lookup on
@@ -2097,18 +2093,16 @@ internal_delete1_in_mnesia(QueueName, OnlyDurable, Reason) ->
     end,
     %% we want to execute some things, as decided by rabbit_exchange,
     %% after the transaction.
-    rabbit_binding:remove_for_destination(QueueName, OnlyDurable).
+    rabbit_binding:remove_for_destination_in_mnesia(QueueName, OnlyDurable).
 
-internal_delete1_in_khepri(QueueName, _OnlyDurable, _Reason) ->
+internal_delete1_in_khepri(QueueName, OnlyDurable, _Reason) ->
     Path = mnesia_table_to_khepri_path(rabbit_queue, QueueName),
     DurablePath = mnesia_table_to_khepri_path(rabbit_durable_queue, QueueName),
     {ok, _} = khepri_tx:delete(Path),
     {ok, _} = khepri_tx:delete(DurablePath),
     %% we want to execute some things, as decided by rabbit_exchange,
     %% after the transaction.
-    %% TODO bindings needs to be updated to khepri
-    %%% Commented out so I can test a bit the rest! Otherwise any test setup will fail...
-    %% rabbit_binding:remove_for_destination(QueueName, OnlyDurable).
+    rabbit_binding:remove_for_destination_in_khepri(QueueName, OnlyDurable),
     ok.
 
 -spec internal_delete(name(), rabbit_types:username()) -> 'ok'.
@@ -2382,12 +2376,11 @@ delete_queues_on_node_down(Node) ->
 
 delete_queue_in_mnesia(QueueName) ->
     ok = mnesia:delete({rabbit_queue, QueueName}),
-    rabbit_binding:remove_transient_for_destination(QueueName).
+    rabbit_binding:remove_transient_for_destination_in_mnesia(QueueName).
 
 delete_queue_in_khepri(QueueName) ->
-    ok = khepri_tx:delete(khepri_queue_path(QueueName)).
-    %% TODO delete bindings once implemented!!!
-    %% rabbit_binding:remove_transient_for_destination(QueueName).
+    ok = khepri_tx:delete(khepri_queue_path(QueueName)),
+    rabbit_binding:remove_transient_for_destination_in_khepri(QueueName).
 
 % If there are many queues and we delete them all in a single Mnesia transaction,
 % this can block all other Mnesia operations for a really long time.

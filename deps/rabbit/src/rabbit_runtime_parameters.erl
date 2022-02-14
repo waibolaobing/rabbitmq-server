@@ -205,7 +205,7 @@ khepri_update(Key, Term) ->
 
 khepri_update(VHost, Comp, Name, Term) ->
     rabbit_khepri:transaction(
-      rabbit_vhost:with_in_khepri(
+      rabbit_vhost:with_in_khepri_tx(
         VHost, khepri_update_fun({VHost, Comp, Name}, Term))).
 
 khepri_update_fun(Key, Term) ->
@@ -324,7 +324,7 @@ khepri_clear(VHost, Component, Name) ->
                 ok
         end,
     ok = rabbit_khepri:transaction(
-           rabbit_vhost:with_in_khepri(VHost, F)).
+           rabbit_vhost:with_in_khepri_tx(VHost, F)).
 
 event_notify(_Event, _VHost, <<"policy">>, _Props) ->
     ok;
@@ -404,7 +404,7 @@ list_in_khepri_tx(VHost, Component) ->
         %% Inside of a transaction, using `rabbit_vhost:exists` will cause
         %% a deadlock and timeout on the transaction, as it uses `rabbit_khepri:exists`.
         %% The `with` function uses the `khepri_tx` API instead
-        _     -> rabbit_vhost:with_in_khepri(VHost, fun() -> ok end)
+        _     -> rabbit_vhost:with_in_khepri_tx(VHost, fun() -> ok end)
     end,
     case khepri_tx:get(Path) of
         {ok, Result} ->

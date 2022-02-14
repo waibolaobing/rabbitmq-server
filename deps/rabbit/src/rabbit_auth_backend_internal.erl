@@ -1330,7 +1330,7 @@ list_user_permissions(Username, Ref, AggregatorPid) ->
 list_vhost_permissions(VHostPath) ->
     MnesiaThunk = rabbit_vhost:with_in_mnesia(
                    VHostPath, match_user_vhost('_', VHostPath)),
-    KhepriThunk = rabbit_vhost:with_in_khepri(
+    KhepriThunk = rabbit_vhost:with_in_khepri_tx(
                     VHostPath,
                     match_path_in_khepri(
                       khepri_user_permission_path(?STAR, VHostPath))),
@@ -1342,7 +1342,7 @@ list_vhost_permissions(VHostPath) ->
 list_vhost_permissions(VHostPath, Ref, AggregatorPid) ->
     MnesiaThunk = rabbit_vhost:with_in_mnesia(
                     VHostPath, match_user_vhost('_', VHostPath)),
-    KhepriThunk = rabbit_vhost:with_in_khepri(
+    KhepriThunk = rabbit_vhost:with_in_khepri_tx(
                     VHostPath,
                     match_path_in_khepri(
                       khepri_user_permission_path(?STAR, VHostPath))),
@@ -1412,7 +1412,7 @@ list_user_topic_permissions(Username) ->
 list_vhost_topic_permissions(VHost) ->
     MnesiaThunk = rabbit_vhost:with_in_mnesia(
                     VHost, match_user_vhost_topic_permission('_', VHost)),
-    KhepriThunk = rabbit_vhost:with_in_khepri(
+    KhepriThunk = rabbit_vhost:with_in_khepri_tx(
                     VHost,
                     match_path_in_khepri(
                       khepri_topic_permission_path(?STAR, VHost, ?STAR))),

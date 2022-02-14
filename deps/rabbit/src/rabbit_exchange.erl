@@ -18,7 +18,8 @@
          route/2, delete/3, validate_binding/2, count/0]).
 -export([list_names/0, is_amq_prefixed/1]).
 %% these must be run inside a mnesia tx
--export([maybe_auto_delete/2, serial_in_mnesia/1, serial_in_khepri/1, peek_serial/1, update/2]).
+-export([serial_in_mnesia/1, serial_in_khepri/1, peek_serial/1, update/2]).
+-export([maybe_auto_delete_in_mnesia/2, maybe_auto_delete_in_khepri/2]).
 -export([peek_serial_in_mnesia/1, peek_serial_in_khepri/1]).
 -export([mnesia_write_exchange_to_khepri/1, mnesia_write_durable_exchange_to_khepri/1,
          mnesia_write_exchange_serial_to_khepri/1, mnesia_delete_exchange_to_khepri/1,
@@ -26,7 +27,8 @@
          clear_exchange_data_in_khepri/0, clear_durable_exchange_data_in_khepri/0,
          clear_exchange_serial_data_in_khepri/0]).
 -export([list_in_mnesia/2, list_in_khepri_tx/1, update_in_mnesia/2, update_in_khepri/2]).
--export([list_in_mnesia/1, list_in_khepri/1, store_in_khepri/2]).
+-export([list_in_mnesia/1, list_in_khepri/1, store_in_khepri/2,
+         lookup_as_list_in_khepri/1, lookup_in_khepri/2]).
 
 %%----------------------------------------------------------------------------
 
@@ -307,6 +309,13 @@ lookup(Name) ->
 
 lookup_in_mnesia(Name) ->
     rabbit_misc:dirty_read({rabbit_exchange, Name}).
+
+lookup_in_khepri(Table, Name) ->
+    Path = mnesia_table_to_khepri_path(Table, Name),
+    case khepri_tx:get(Path) of
+        {ok, #{data := X}} -> {ok, X};
+        _ -> {error, not_found}
+    end.
 
 lookup_in_khepri(Name) ->
     Path = khepri_exchange_path(Name),
@@ -697,14 +706,6 @@ call_with_exchange_in_mnesia(XName, Fun) ->
                 end
       end).
 
-call_with_exchange_in_khepri(XName, Fun) ->
-    rabbit_khepri_misc:execute_khepri_tx_with_tail(
-      fun () -> case lookup_as_list_in_khepri(XName) of
-                    []  -> rabbit_misc:const({error, not_found});
-                    [X] -> Fun(X)
-                end
-      end).      
-
 -spec delete
         (name(),  'true', rabbit_types:username()) ->
                     'ok'| rabbit_types:error('not_found' | 'in_use');
@@ -744,19 +745,22 @@ delete(XName, IfUnused, Username) ->
                     end)
           end,
           fun() ->
-                  call_with_exchange_in_khepri(
-                    XName,
-                    fun (X) ->
-                            case KhepriFun(X, false) of
-                                {deleted, X, Bs, Deletions} ->
-                                    %% TODO this bindings might notify things? review!
-                                    rabbit_binding:process_deletions(
-                                      rabbit_binding:add_deletion(
-                                        XName, {X, deleted, Bs}, Deletions), Username);
-                                {error, _InUseOrNotFound} = E ->
-                                    rabbit_misc:const(E)
-                            end
-                    end)
+                  case rabbit_khepri:transaction(
+                         fun() ->
+                                 case lookup_as_list_in_khepri(XName) of
+                                     [] -> {error, not_found};
+                                     [X] -> KhepriFun(X, false)
+                                 end
+                         end) of
+                      {error, _} = E ->
+                          E;
+                      {deleted, X, Bs, Deletions} ->
+                          %% TODO this bindings might notify things? review!
+                          %% TODO process_deletions should happen outside the transaction
+                          rabbit_binding:process_deletions_in_khepri(
+                            rabbit_binding:add_deletion(
+                              XName, {X, deleted, Bs}, Deletions), Username)
+                  end
           end)
     after
         rabbit_runtime_parameters:clear(XName#resource.virtual_host,
@@ -772,27 +776,34 @@ validate_binding(X = #exchange{type = XType}, Binding) ->
     Module = type_to_module(XType),
     Module:validate_binding(X, Binding).
 
--spec maybe_auto_delete
+-spec maybe_auto_delete_in_mnesia
         (rabbit_types:exchange(), boolean())
         -> 'not_deleted' | {'deleted', rabbit_binding:deletions()}.
 
-%% TODO this is called from rabbit_binding, fix it then!!! We need the khepri version
-maybe_auto_delete(#exchange{auto_delete = false}, _OnlyDurable) ->
+maybe_auto_delete_in_mnesia(#exchange{auto_delete = false}, _OnlyDurable) ->
     not_deleted;
-maybe_auto_delete(#exchange{auto_delete = true} = X, OnlyDurable) ->
+maybe_auto_delete_in_mnesia(#exchange{auto_delete = true} = X, OnlyDurable) ->
     case conditional_delete_in_mnesia(X, OnlyDurable) of
         {error, in_use}             -> not_deleted;
         {deleted, X, [], Deletions} -> {deleted, Deletions}
     end.
 
+maybe_auto_delete_in_khepri(#exchange{auto_delete = false}, _OnlyDurable) ->
+    not_deleted;
+maybe_auto_delete_in_khepri(#exchange{auto_delete = true} = X, OnlyDurable) ->
+    case conditional_delete_in_khepri(X, OnlyDurable) of
+        {error, in_use}             -> not_deleted;
+        {deleted, X, [], Deletions} -> {deleted, Deletions}
+    end.
+
 conditional_delete_in_mnesia(X = #exchange{name = XName}, OnlyDurable) ->
-    case rabbit_binding:has_for_source(XName) of
+    case rabbit_binding:has_for_source_in_mnesia(XName) of
         false  -> internal_delete_in_mnesia(X, OnlyDurable, false);
         true   -> {error, in_use}
     end.
 
 conditional_delete_in_khepri(X = #exchange{name = XName}, OnlyDurable) ->
-    case rabbit_binding:has_for_source(XName) of
+    case rabbit_binding:has_for_source_in_khepri(XName) of
         false  -> internal_delete_in_khepri(X, OnlyDurable, false);
         true   -> {error, in_use}
     end.
@@ -808,22 +819,22 @@ internal_delete_in_mnesia(X = #exchange{name = XName}, OnlyDurable, RemoveBindin
     ok = mnesia:delete({rabbit_exchange_serial, XName}),
     mnesia:delete({rabbit_durable_exchange, XName}),
     Bindings = case RemoveBindingsForSource of
-        true  -> rabbit_binding:remove_for_source(XName);
+        true  -> rabbit_binding:remove_for_source_in_mnesia(XName);
         false -> []
     end,
-    {deleted, X, Bindings, rabbit_binding:remove_for_destination(
+    {deleted, X, Bindings, rabbit_binding:remove_for_destination_in_mnesia(
                              XName, OnlyDurable)}.
 
 internal_delete_in_khepri(X = #exchange{name = XName}, OnlyDurable, RemoveBindingsForSource) ->
-    ok = khepri_tx:delete(khepri_exchange_path(XName)),
-    ok = khepri_tx:delete(khepri_exchange_serial_path(XName)),
-    ok = khepri_tx:delete(khepri_durable_exchange_path(XName)),
+    {ok, _} = khepri_tx:delete(khepri_exchange_path(XName)),
+    {ok, _} = khepri_tx:delete(khepri_exchange_serial_path(XName)),
+    {ok, _} = khepri_tx:delete(khepri_durable_exchange_path(XName)),
     %% TODO bindings...
     Bindings = case RemoveBindingsForSource of
-        true  -> rabbit_binding:remove_for_source(XName);
+        true  -> rabbit_binding:remove_for_source_in_khepri(XName);
         false -> []
     end,
-    {deleted, X, Bindings, rabbit_binding:remove_for_destination(
+    {deleted, X, Bindings, rabbit_binding:remove_for_destination_in_khepri(
                              XName, OnlyDurable)}.
 
 next_serial_in_mnesia(XName) ->
@@ -833,11 +844,14 @@ next_serial_in_mnesia(XName) ->
     Serial.
 
 next_serial_in_khepri(XName) ->
-    Serial = peek_serial_in_khepri(XName, write),
-    Path = khepri_exchange_serial_path(XName),
-    {ok, _} = khepri_tx:put(Path,
-                            #exchange_serial{name = XName, next = Serial + 1}, write),
-    Serial.
+    rabbit_khepri:transaction(
+      fun() ->
+              Serial = peek_serial_in_khepri(XName, write),
+              Path = khepri_exchange_serial_path(XName),
+              {ok, _} = khepri_tx:put(Path,
+                                      #exchange_serial{name = XName, next = Serial + 1}, write),
+              Serial
+      end).
 
 -spec peek_serial(name()) -> pos_integer() | 'undefined'.
 

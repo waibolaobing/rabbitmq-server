@@ -15,8 +15,8 @@
 
 -export([recover/0, recover/1, read_config/1]).
 -export([add/2, add/4, delete/2, exists/1,
-         with/2, with_in_mnesia/2, with_in_khepri/2,
-         with_user_and_vhost/3, with_user_and_vhost_in_mnesia/3, with_user_and_vhost_in_khepri/3,
+         with_in_mnesia/2, with_in_khepri_tx/2,
+         with_user_and_vhost_in_mnesia/3, with_user_and_vhost_in_khepri/3,
          assert/1, update/2,
          set_limits/2, vhost_cluster_state/1, is_running_on_all_nodes/1, await_running_on_all_nodes/2,
         list/0, count/0, list_names/0, all/0, all_tagged_with/1]).
@@ -330,11 +330,11 @@ delete(VHost, ActingUser) ->
      end || Q <- rabbit_amqqueue:list(VHost)],
     [assert_benign(rabbit_exchange:delete(Name, false, ActingUser), ActingUser) ||
         #exchange{name = Name} <- rabbit_exchange:list(VHost)],
-    WithMnesia = with(VHost, fun () -> internal_delete_in_mnesia(VHost, ActingUser) end),
-    WithKhepri = with(VHost, fun () -> internal_delete_in_khepri(VHost, ActingUser) end),
+    WithMnesia = with_in_mnesia(VHost, fun () -> internal_delete_in_mnesia(VHost, ActingUser) end),
+    WithKhepri = with_in_khepri(VHost, fun () -> internal_delete_in_khepri(VHost, ActingUser) end),
     Funs = rabbit_khepri:try_mnesia_or_khepri(
              fun() -> rabbit_misc:execute_mnesia_transaction(WithMnesia) end,
-             fun() -> rabbit_khepri:transaction(WithKhepri) end),
+             fun() -> WithKhepri() end),
     ok = rabbit_event:notify(vhost_deleted, [{name, VHost},
                                              {user_who_performed_action, ActingUser}]),
     [case Fun() of
@@ -484,7 +484,7 @@ internal_delete_in_khepri(VHost, ActingUser) ->
      || Info <- rabbit_runtime_parameters:list(VHost)],
     Fs2 = [rabbit_policy:delete(VHost, proplists:get_value(name, Info), ActingUser)
            || Info <- rabbit_policy:list(VHost)],
-    _ = internal_delete_in_khepri(VHost),
+    _ = rabbit_khepri:transaction(fun() -> internal_delete_in_khepri(VHost) end),
     Fs1 ++ Fs2.
 
 internal_delete_in_mnesia_part1(VHost, ActingUser) ->
@@ -503,7 +503,7 @@ internal_delete_in_mnesia_part2(VHost) ->
 
 internal_delete_in_khepri(VHost) ->
     Path = khepri_vhost_path(VHost),
-    ok = rabbit_khepri:delete(Path),
+    {ok, _} = khepri_tx:delete(Path),
     ok.
 
 -spec exists(vhost:name()) -> boolean().
@@ -591,13 +591,7 @@ lookup_in_khepri(VHostName) ->
         _            -> {error, {no_such_vhost, VHostName}}
     end.
 
--spec with(vhost:name(), rabbit_misc:thunk(A)) -> A.
-with(VHostName, Thunk) ->
-    fun() ->
-            rabbit_khepri:try_mnesia_or_khepri(
-              with_in_mnesia(VHostName, Thunk),
-              with_in_khepri(VHostName, Thunk))
-    end.
+-spec with_in_mnesia(vhost:name(), rabbit_misc:thunk(A)) -> A.
 
 with_in_mnesia(VHostName, Thunk) ->
     fun() ->
@@ -607,7 +601,7 @@ with_in_mnesia(VHostName, Thunk) ->
             end
     end.
 
-with_in_khepri(VHostName, Thunk) ->
+with_in_khepri_tx(VHostName, Thunk) ->
     fun() ->
             Path = khepri_vhost_path(VHostName),
             case khepri_tx:exists(Path) of
@@ -616,14 +610,13 @@ with_in_khepri(VHostName, Thunk) ->
             end
     end.
 
--spec with_user_and_vhost(rabbit_types:username(), vhost:name(), rabbit_misc:thunk(A)) -> A.
-with_user_and_vhost(Username, VHostName, Thunk) ->
+with_in_khepri(VHostName, Thunk) ->
     fun() ->
-            rabbit_khepri:try_mnesia_or_khepri(
-              rabbit_auth_backend_internal:with_user_in_mnesia(
-                Username, with_in_mnesia(VHostName, Thunk)),
-              rabbit_auth_backend_internal:with_user_in_khepri(
-                Username, with_in_khepri(VHostName, Thunk)))
+            Path = khepri_vhost_path(VHostName),
+            case rabbit_khepri:exists(Path) of
+                true  -> Thunk();
+                false -> {no_such_vhost, VHostName}
+            end
     end.
 
 with_user_and_vhost_in_mnesia(Username, VHostName, Thunk) ->
@@ -632,7 +625,7 @@ with_user_and_vhost_in_mnesia(Username, VHostName, Thunk) ->
 
 with_user_and_vhost_in_khepri(Username, VHostName, Thunk) ->
     rabbit_auth_backend_internal:with_user_in_khepri(
-      Username, with_in_khepri(VHostName, Thunk)).
+      Username, with_in_khepri_tx(VHostName, Thunk)).
 
 %% Like with/2 but outside an Mnesia tx
 
