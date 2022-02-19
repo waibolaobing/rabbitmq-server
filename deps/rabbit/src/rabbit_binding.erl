@@ -85,7 +85,8 @@ new(Src, RoutingKey, Dst, Arguments) ->
 recover() ->
     rabbit_khepri:try_mnesia_or_khepri(
       fun() -> recover_in_mnesia() end,
-      fun() -> recover_in_khepri() end).
+      %% Nothing to do in khepri, single table storage
+      fun() -> ok end).
 
 recover_in_mnesia() ->
     rabbit_misc:execute_mnesia_transaction(
@@ -97,18 +98,6 @@ recover_in_mnesia() ->
                 mnesia:dirty_write(rabbit_semi_durable_route, Route)
             end,
         lists:foreach(Fun, Routes)
-    end).
-
-recover_in_khepri() ->
-    rabbit_khepri:transaction(
-        fun () ->
-                Path = khepri_durable_routes_path(),
-                {ok, Map} = rabbit_khepri:tx_match_and_get_data(Path ++ [?STAR_STAR]),
-                Fun = fun([?MODULE, durable_routes | Rest], Value) ->
-                              SemiDurablePath = [?MODULE, semi_durable_routes] ++ Rest,
-                              khepri_tx:put(SemiDurablePath, #kpayload_data{data = Value})
-                      end,
-                maps:foreach(Fun, Map)
     end).
 
 %% Virtual host-specific recovery
@@ -132,8 +121,9 @@ recover(XNames, QNames) ->
                       rabbit_misc:dirty_read_all(rabbit_semi_durable_route)]
       end,
       fun() ->
-              Path = khepri_semi_durable_routes_path(),
-              {ok, Map} = rabbit_khepri:match_and_get_data(Path ++ [?STAR_STAR]),
+              Path = khepri_routes_path(),
+              {ok, Map} = rabbit_khepri:match_and_get_data(
+                            Path ++ [?STAR_STAR, #if_data_matches{pattern = #{type => semi_durable}}]),
               maps:foreach(
                 fun(K, _) ->
                         recover_semi_durable_route_in_khepri(Gatherer, K, SelectSetInKhepri(K))
@@ -188,8 +178,7 @@ recover_semi_durable_route_txn_in_khepri(Path, X) ->
     rabbit_khepri_misc:execute_khepri_transaction(
       fun () ->
               case khepri_tx:get(Path) of
-                  {ok, #{Path := #{data := Set}}} ->
-                      sync_transient_route_in_khepri(Path, Set),
+                  {ok, #{Path := #{data := #{bindings := Set}}}} ->
                       {rabbit_exchange:serial_in_mnesia(X), Set};
                   _ ->
                       no_recover
@@ -233,7 +222,7 @@ exists(Binding) ->
 
 exists_in_khepri(Path, Binding) ->
     case khepri_tx:get(Path) of
-        {ok, #{Path := #{data := Set}}} ->
+        {ok, #{Path := #{data := #{bindings := Set}}}} ->
             sets:is_element(Binding, Set);
         _ ->
             false
@@ -312,7 +301,7 @@ add_in_mnesia(Src, Dst, B, ActingUser) ->
 
 add_in_khepri(Src, Dst, B, ActingUser) ->
     [SrcDurable, DstDurable] = [durable(E) || E <- [Src, Dst]],
-    ok = add_binding(#route{binding = B}, SrcDurable, DstDurable),
+    ok = add_binding(#route{binding = B}, binding_type(SrcDurable, DstDurable)),
     Serial = rabbit_exchange:serial_in_khepri(Src),
     fun () ->
             x_callback(transaction, Src, sync_binding, B),
@@ -322,6 +311,13 @@ add_in_khepri(Src, Dst, B, ActingUser) ->
                    binding_created,
                    info(B) ++ [{user_who_performed_action, ActingUser}])
     end.
+
+binding_type(true, true) ->
+    durable;
+binding_type(false, true) ->
+    semi_durable;
+binding_type(_, _) ->
+    transient.
 
 -spec remove(rabbit_types:binding()) -> bind_res().
 remove(Binding) -> remove(Binding, fun (_Src, _Dst) -> ok end, ?INTERNAL_USER).
@@ -359,22 +355,15 @@ remove_in_mnesia(Binding, InnerFun, ActingUser) ->
 
 remove_in_khepri(Binding, InnerFun, ActingUser) ->
     Path = khepri_route_path(Binding),
-    DurablePath = khepri_durable_route_path(Binding),
     binding_action_in_khepri(
       Binding,
       fun (Src, Dst, B) ->
               case exists_in_khepri(Path, Binding) of
                   false ->
-                      case exists_in_khepri(DurablePath, Binding) of
-                          false -> rabbit_misc:const(ok);
-                          %% We still delete the binding and run
-                          %% all post-delete functions if there is only
-                          %% a durable route in the database
-                          true -> remove_in_khepri(Src, Dst, B, ActingUser)
-                      end;
+                      rabbit_misc:const(ok);
                   true ->
                       case InnerFun(Src, Dst) of
-                          ok -> remove_in_khepri(Src, Dst, B, ActingUser);
+                          ok -> remove_in_khepri(B, ActingUser);
                           {error, _} = Err -> rabbit_misc:const(Err)
                       end
               end
@@ -383,7 +372,7 @@ remove_in_khepri(Binding, InnerFun, ActingUser) ->
 remove(Src, Dst, B, ActingUser) ->
     rabbit_khepri:try_mnesia_or_khepri(
       fun() -> remove_in_mnesia(Src, Dst, B, ActingUser) end,
-      fun() -> remove_in_khepri(Src, Dst, B, ActingUser) end).
+      fun() -> remove_in_khepri(B, ActingUser) end).
 
 remove_in_mnesia(Src, Dst, B, ActingUser) ->
     ok = sync_route(#route{binding = B}, durable(Src), durable(Dst),
@@ -392,8 +381,8 @@ remove_in_mnesia(Src, Dst, B, ActingUser) ->
                   B#binding.source, [B], new_deletions(), false),
     process_deletions(Deletions, ActingUser).
 
-remove_in_khepri(Src, Dst, B, ActingUser) ->
-    ok = delete_binding(B, durable(Src), durable(Dst)),
+remove_in_khepri(B, ActingUser) ->
+    ok = delete_binding(B),
     Deletions = maybe_auto_delete_in_khepri(
                   B#binding.source, [B], new_deletions(), false),
     process_deletions(Deletions, ActingUser).
@@ -573,9 +562,8 @@ has_for_source_in_mnesia(SrcName) ->
         contains(rabbit_semi_durable_route, Match).
 
 has_for_source_in_khepri(SrcName) ->
-    (not maps:is_empty(match_source_in_khepri(SrcName, routes)))
-        orelse (not maps:is_empty(match_source_in_khepri(
-                                    SrcName, semi_durable_routes))).
+    (not maps:is_empty(match_source_in_khepri(SrcName, transient)))
+        orelse (not maps:is_empty(match_source_in_khepri(SrcName, semi_durable))).
 
 -spec remove_for_source_in_mnesia(rabbit_types:binding_source()) -> bindings().
 
@@ -588,25 +576,15 @@ remove_for_source_in_mnesia(SrcName) ->
             mnesia:dirty_match_object(rabbit_semi_durable_route, Match))).
 
 remove_for_source_in_khepri(SrcName) ->
-    %% TODO merge these 4 tables into one, they are only flags!
-    Bindings = match_source_in_khepri(SrcName, routes),
-    SemiDurableBindings = match_source_in_khepri(SrcName, semi_durable_routes),
+    Bindings = match_source_in_khepri(SrcName),
     remove_in_khepri(Bindings),
-    remove_in_khepri(match_source_in_khepri(SrcName, durable_routes)),
-    remove_in_khepri(SemiDurableBindings),
-    remove_in_khepri(match_source_in_khepri(SrcName, reverse_routes)),
     maps:fold(fun(_, Set, Acc) ->
                       sets:to_list(Set) ++ Acc
-              end, [], maps:merge(Bindings, SemiDurableBindings)).
+              end, [], Bindings).
 
 remove_in_khepri(Map) when is_map(Map) ->
     maps:foreach(fun(K, _V) ->
                          khepri_tx:delete(K)
-                 end, Map).
-
-remove_in_khepri(Map, Type) when is_map(Map) ->
-    maps:foreach(fun(K, _V) ->
-                         khepri_tx:delete(update_khepri_path_to(K, Type))
                  end, Map).
 
 -spec remove_for_destination_in_mnesia
@@ -687,66 +665,31 @@ sync_transient_route(Route, Fun) ->
 
 binding_set(Path) ->
     case khepri_tx:get(Path) of
-        {ok, #{Path := #{data := Set}}} ->
+        {ok, #{Path := #{data := #{bindings := Set}}}} ->
             Set;
         _ ->
             sets:new()
     end.
 
-add_binding(Binding, true, true) ->
-    Path = khepri_durable_route_path(Binding),
-    Set = binding_set(Path),
-    {ok, _} = khepri_tx:put(Path, #kpayload_data{data = sets:add_element(Binding, Set)}),
-    add_binding(Binding, false, true);
-
-add_binding(Binding, false, true) ->
-    Path = khepri_semi_durable_route_path(Binding),
-    Set = binding_set(Path),
-    {ok, _} = khepri_tx:put(Path, #kpayload_data{data = sets:add_element(Binding, Set)}),
-    add_binding(Binding, false, false);
-
-add_binding(Binding, _SrcDurable, false) ->
+add_binding(Binding, BindingType) ->
     Path = khepri_route_path(Binding),
     Set = binding_set(Path),
-    {ok, _} = khepri_tx:put(Path, #kpayload_data{data = sets:add_element(Binding, Set)}),
-    ReversePath = khepri_reverse_route_path(Binding),
-    RSet = binding_set(ReversePath),
-    {ok, _} = khepri_tx:put(ReversePath,
-                            #kpayload_data{data = sets:add_element(reverse_binding(Binding), RSet)}).
+    Data = #{bindings => sets:add_element(Binding, Set), type => BindingType},
+    {ok, _} = khepri_tx:put(Path, #kpayload_data{data = Data}).
 
-sync_transient_route_in_khepri(Path0, Set) ->
-    Path = update_khepri_path_to(Path0, routes),
-    ReversePath = update_khepri_path_to(Path0, reverse_routes),
-    {ok, _} = khepri_tx:put(Path, #kpayload_data{data = Set}),
-    {ok, _} = khepri_tx:put(ReversePath, #kpayload_data{data = reverse_set_of_bindings(Set)}).
-
-delete_binding(Binding, true, true) ->
-    Path = khepri_durable_route_path(Binding),
-    Set = binding_set(Path),
-    delete_binding_or_path(Path, Set, Binding),
-    delete_binding(Binding, false, true);
-
-delete_binding(Binding, false, true) ->
-    Path = khepri_semi_durable_route_path(Binding),
-    Set = binding_set(Path),
-    delete_binding_or_path(Path, Set, Binding),
-    delete_binding(Binding, false, false);
-
-delete_binding(Binding, _SrcDurable, false) ->
+delete_binding(Binding) ->
     Path = khepri_route_path(Binding),
-    Set = binding_set(Path),
-    delete_binding_or_path(Path, Set, Binding),
-    ReversePath = khepri_reverse_route_path(Binding),
-    RSet = binding_set(ReversePath),
-    delete_binding_or_path(ReversePath, RSet, reverse_binding(Binding)).
-
-delete_binding_or_path(Path, Set0, Binding) ->
-    Set = sets:del_element(Binding, Set0),
-    case sets:is_empty(Set) of
-        true ->
-            khepri_tx:delete(Path);
-        false ->
-            {ok, _} = khepri_tx:put(Path, #kpayload_data{data = Set})
+    case khepri_tx:get(Path) of
+        {ok, #{Path := #{data := #{bindings := Set0} = Data}}} ->
+            Set = sets:del_element(Binding, Set0),
+            case sets:is_empty(Set) of
+                true ->
+                    khepri_tx:delete(Path);
+                false ->
+                    {ok, _} = khepri_tx:put(Path, #kpayload_data{data = Data#{bindings := Set}})
+            end;
+        _ ->
+            ok
     end.
 
 call_with_source_and_destination_in_mnesia(SrcName, DstName, Fun, ErrFun) ->
@@ -867,12 +810,11 @@ remove_for_destination_in_mnesia(DstName, OnlyDurable, Fun) ->
                         lists:keysort(#binding.source, Bindings), OnlyDurable).
 
 remove_transient_for_destination_in_khepri(DstName) ->
-    ReverseBindingsMap = match_destination_in_khepri(DstName, reverse_routes),
-    remove_in_khepri(ReverseBindingsMap),
-    remove_in_khepri(ReverseBindingsMap, routes),
+    TransientBindingsMap = match_destination_in_khepri(DstName, transient),
+    remove_in_khepri(TransientBindingsMap),
     Bindings = maps:fold(fun(_, Set, Acc) ->
                                  sets:to_list(Set) ++ Acc
-                         end, [], ReverseBindingsMap),
+                         end, [], TransientBindingsMap),
     group_bindings_fold(fun maybe_auto_delete_in_khepri/4, new_deletions(),
                         lists:keysort(#binding.source, Bindings), false).
 
@@ -880,20 +822,12 @@ remove_for_destination_in_khepri(DstName, OnlyDurable) ->
     BindingsMap =
         case OnlyDurable of
             false ->
-                ReverseBindingsMap = match_destination_in_khepri(DstName, reverse_routes),
-                remove_in_khepri(ReverseBindingsMap),
-                remove_in_khepri(ReverseBindingsMap, routes),
-                remove_in_khepri(ReverseBindingsMap, durable_routes),
-                remove_in_khepri(ReverseBindingsMap, semi_durable_routes),
-                ReverseBindingsMap;
+                TransientBindingsMap = match_destination_in_khepri(DstName, transient),
+                remove_in_khepri(TransientBindingsMap),
+                TransientBindingsMap;
             true  ->
-                DurableBindingsMap = match_destination_in_khepri(DstName, durable_routes),
-                SemiDurableBindingsMap = match_destination_in_khepri(DstName, semi_durable_routes),
-                BindingsMap0 = maps:merge(DurableBindingsMap, SemiDurableBindingsMap),
-                remove_in_khepri(DurableBindingsMap),
-                remove_in_khepri(SemiDurableBindingsMap),
-                remove_in_khepri(BindingsMap0, routes),
-                remove_in_khepri(BindingsMap0, reverse_routes),
+                BindingsMap0 = match_destination_in_khepri(DstName),
+                remove_in_khepri(BindingsMap0),
                 BindingsMap0
         end,
     Bindings = maps:fold(fun(_, Set, Acc) ->
@@ -985,11 +919,6 @@ reverse_binding(#binding{source      = SrcName,
                      destination = DstName,
                      key         = Key,
                      args        = Args}.
-
-reverse_set_of_bindings(Set) ->
-    sets:fold(fun(B, Set0) ->
-                      sets:add_element(reverse_binding(B), Set0)
-              end, sets:new(), Set).
 
 %% ----------------------------------------------------------------------------
 %% Binding / exchange deletion abstraction API
@@ -1091,32 +1020,8 @@ khepri_route_path(#binding{source = #resource{virtual_host = VHost, name = SrcNa
                            key = RoutingKey}) ->
     [?MODULE, routes, VHost, SrcName, Kind, DstName, RoutingKey].
 
-khepri_durable_route_path(#binding{source = #resource{virtual_host = VHost, name = SrcName},
-                                   destination = #resource{kind = Kind, name = DstName},
-                                   key = RoutingKey}) ->
-    [?MODULE, durable_routes, VHost, SrcName, Kind, DstName, RoutingKey].
-
-khepri_semi_durable_route_path(#binding{source = #resource{virtual_host = VHost, name = SrcName},
-                                        destination = #resource{kind = Kind, name = DstName},
-                                        key = RoutingKey}) ->
-    [?MODULE, semi_durable_routes, VHost, SrcName, Kind, DstName, RoutingKey].
-
-khepri_reverse_route_path(#reverse_binding{source = #resource{virtual_host = VHost, name = SrcName},
-                                           destination = #resource{kind = Kind, name = DstName},
-                                           key = RoutingKey}) ->
-    [?MODULE, reverse_routes, VHost, SrcName, Kind, DstName, RoutingKey].
-
 khepri_routes_path() ->
     [?MODULE, routes].
-
-khepri_durable_routes_path() ->
-    [?MODULE, durable_routes].
-
-khepri_semi_durable_routes_path() ->
-    [?MODULE, semi_durable_routes].
-
-khepri_reverse_routes_path() ->
-    [?MODULE, reverse_routes].
 
 destination_from_khepri_path([?MODULE, _Type, VHost, _Src, Kind, Dst | _]) ->
     #resource{virtual_host = VHost, kind = Kind, name = Dst}.
@@ -1124,38 +1029,24 @@ destination_from_khepri_path([?MODULE, _Type, VHost, _Src, Kind, Dst | _]) ->
 source_from_khepri_path([?MODULE, _Type, VHost, Src | _]) ->
     #resource{virtual_host = VHost, kind = exchange, name = Src}.
 
-update_khepri_path_to([?MODULE, _Type | Rest], RouteType) ->
-    [?MODULE, RouteType] ++ Rest.
-
-match_source_in_khepri(#resource{virtual_host = VHost, name = Name}, routes) ->
+match_source_in_khepri(#resource{virtual_host = VHost, name = Name}) ->
     Path = khepri_routes_path() ++ [VHost, Name, ?STAR_STAR],
-    match_in_khepri(Path);
-match_source_in_khepri(#resource{virtual_host = VHost, name = Name}, durable_routes) ->
-    Path = khepri_durable_routes_path() ++ [VHost, Name, ?STAR_STAR],
-    match_in_khepri(Path);
-match_source_in_khepri(#resource{virtual_host = VHost, name = Name}, semi_durable_routes) ->
-    Path = khepri_semi_durable_routes_path() ++ [VHost, Name, ?STAR_STAR],
-    match_in_khepri(Path);
-match_source_in_khepri(#resource{virtual_host = VHost, name = Name}, reverse_routes) ->
-    Path = khepri_reverse_routes_path() ++ [VHost, Name, ?STAR_STAR],
-    match_in_khepri(Path).
+    {ok, Map} = rabbit_khepri:tx_match_and_get_data(Path),
+    Map.
 
-match_destination_in_khepri(#resource{virtual_host = VHost, kind = Kind, name = Name}, routes) ->
+match_source_in_khepri(#resource{virtual_host = VHost, name = Name}, Type) ->
+    Path = khepri_routes_path() ++ [VHost, Name, ?STAR_STAR]
+        ++ [#if_data_matches{pattern = #{type => Type}}],
+    {ok, Map} = rabbit_khepri:tx_match_and_get_data(Path),
+    Map.
+
+match_destination_in_khepri(#resource{virtual_host = VHost, kind = Kind, name = Name}) ->
     Path = khepri_routes_path() ++ [VHost, ?STAR, Kind, Name, ?STAR_STAR],
-    match_in_khepri(Path);
-match_destination_in_khepri(#resource{virtual_host = VHost, kind = Kind, name = Name},
-                            durable_routes) ->
-    Path = khepri_durable_routes_path() ++ [VHost, ?STAR, Kind, Name, ?STAR_STAR],
-    match_in_khepri(Path);
-match_destination_in_khepri(#resource{virtual_host = VHost, kind = Kind, name = Name},
-                            semi_durable_routes) ->
-    Path = khepri_semi_durable_routes_path() ++ [VHost, ?STAR, Kind, Name, ?STAR_STAR],
-    match_in_khepri(Path);
-match_destination_in_khepri(#resource{virtual_host = VHost, kind = Kind, name = Name},
-                            reverse_routes) ->
-    Path = khepri_reverse_routes_path() ++ [VHost, ?STAR, Kind, Name, ?STAR_STAR],
-    match_in_khepri(Path).
+    {ok, Map} = rabbit_khepri:tx_match_and_get_data(Path),
+    Map.
 
-match_in_khepri(Path) ->
+match_destination_in_khepri(#resource{virtual_host = VHost, kind = Kind, name = Name}, Type) ->
+    Path = khepri_routes_path() ++ [VHost, ?STAR, Kind, Name, ?STAR_STAR]
+        ++ [#if_data_matches{pattern = #{type => Type}}],
     {ok, Map} = rabbit_khepri:tx_match_and_get_data(Path),
     Map.
