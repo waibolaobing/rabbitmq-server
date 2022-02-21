@@ -87,7 +87,9 @@ recover(VHost) ->
 
 callback(X = #exchange{type       = XType,
                        decorators = Decorators}, Fun, Serial0, Args) ->
-    Serial = fun (_Bool) -> Serial0 end,
+    Serial = if is_function(Serial0) -> Serial0;
+                is_atom(Serial0)     -> fun (_Bool) -> Serial0 end
+             end,
     [ok = apply(M, Fun, [Serial(M:serialise_events(X)) | Args]) ||
         M <- rabbit_exchange_decorator:select(all, Decorators)],
     Module = type_to_module(XType),

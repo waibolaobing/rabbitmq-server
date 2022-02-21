@@ -25,29 +25,52 @@
     match_result().
 
 match_bindings(SrcName, Match) ->
-    MatchHead = #route{binding = #binding{source      = SrcName,
-                                          _           = '_'}},
-    Routes = ets:select(rabbit_route, [{MatchHead, [], [['$_']]}]),
-    [Dest || [#route{binding = Binding = #binding{destination = Dest}}] <-
-        Routes, Match(Binding)].
+    %% TODO performance with khepri, this is on the hot code path!!
+    rabbit_khepri:try_mnesia_or_khepri(
+      fun() ->
+              MatchHead = #route{binding = #binding{source      = SrcName,
+                                                    _           = '_'}},
+              Routes = ets:select(rabbit_route, [{MatchHead, [], [['$_']]}]),
+              [Dest || [#route{binding = Binding = #binding{destination = Dest}}] <-
+                           Routes, Match(Binding)]
+      end,
+      fun() ->
+              Data = rabbit_binding:match_source_in_khepri(SrcName),
+              Bindings = lists:fold(fun(#{bindings := SetOfBindings}, Acc) ->
+                                            sets:to_list(SetOfBindings) ++ Acc
+                                    end, [], maps:values(Data)),
+              [Dest || Binding = #binding{destination = Dest} <- Bindings, Match(Binding)]
+      end).
 
 -spec match_routing_key(rabbit_types:binding_source(),
                              [routing_key()] | ['_']) ->
     match_result().
 
 match_routing_key(SrcName, [RoutingKey]) ->
-    find_routes(#route{binding = #binding{source      = SrcName,
-                                          destination = '$1',
-                                          key         = RoutingKey,
-                                          _           = '_'}},
-                []);
+    rabbit_khepri:try_mnesia_or_khepri(
+      fun() ->
+              find_routes(#route{binding = #binding{source      = SrcName,
+                                                    destination = '$1',
+                                                    key         = RoutingKey,
+                                                    _           = '_'}},
+                          [])
+      end,
+      fun() ->
+              rabbit_khepri:transaction(fun() -> find_routes_in_khepri(SrcName, [RoutingKey]) end)
+      end);
 match_routing_key(SrcName, [_|_] = RoutingKeys) ->
-    find_routes(#route{binding = #binding{source      = SrcName,
-                                          destination = '$1',
-                                          key         = '$2',
-                                          _           = '_'}},
-                [list_to_tuple(['orelse' | [{'=:=', '$2', RKey} ||
-                                               RKey <- RoutingKeys]])]).
+    rabbit_khepri:try_mnesia_or_khepri(
+      fun() ->
+              find_routes(#route{binding = #binding{source      = SrcName,
+                                                    destination = '$1',
+                                                    key         = '$2',
+                                                    _           = '_'}},
+                          [list_to_tuple(['orelse' | [{'=:=', '$2', RKey} ||
+                                                         RKey <- RoutingKeys]])])
+      end,
+      fun() ->
+              find_routes_in_khepri(SrcName, RoutingKeys)
+      end).
 
 %%--------------------------------------------------------------------
 
@@ -64,3 +87,6 @@ match_routing_key(SrcName, [_|_] = RoutingKeys) ->
 %% rabbit_route is.
 find_routes(MatchHead, Conditions) ->
     ets:select(rabbit_route, [{MatchHead, Conditions, ['$1']}]).
+
+find_routes_in_khepri(SrcName, RoutingKeys) ->
+    rabbit_binding:match_source_and_key_in_khepri(SrcName, RoutingKeys).
