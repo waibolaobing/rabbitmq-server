@@ -5,7 +5,7 @@
 %% Copyright (c) 2007-2021 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
--module(classic_queue_prop_SUITE).
+-module(quorum_queue_prop_SUITE).
 -compile(export_all).
 
 -define(NUM_TESTS, 500).
@@ -20,11 +20,9 @@
 -include_lib("amqp_client/include/amqp_client.hrl").
 -include_lib("proper/include/proper.hrl").
 
--record(cq, {
+-record(qq, {
     amq = undefined :: amqqueue:amqqueue(),
     name :: atom(),
-    mode :: classic | lazy,
-    version :: 1 | 2,
 
     %% We have one queue per way of publishing messages (such as channels).
     %% We can only confirm the publish order on a per-channel level because
@@ -74,15 +72,12 @@
 %% Common Test.
 
 all() ->
-    [{group, classic_queue_tests}].
+    [{group, quorum_queue_tests}].
 
 groups() ->
-    [{classic_queue_tests, [], [
-%        manual%,
-        classic_queue_v1,
-        lazy_queue_v1,
-        classic_queue_v2,
-        lazy_queue_v2
+    [{quorum_queue_tests, [], [
+        manual
+%        quorum_queue
     ]}].
 
 init_per_suite(Config) ->
@@ -92,17 +87,14 @@ init_per_suite(Config) ->
 end_per_suite(Config) ->
     rabbit_ct_helpers:run_teardown_steps(Config).
 
-init_per_group(Group = classic_queue_tests, Config) ->
+init_per_group(Group = quorum_queue_tests, Config) ->
     Config1 = rabbit_ct_helpers:set_config(Config, [
         {rmq_nodename_suffix, Group},
         {rmq_nodes_count, 1},
-        {erlang_node_config, [{rabbit, [
+        {erlang_node_config, [{ra, [
             %% We make sure the server can handle fast-paced forced queue crashes
             %% for the purpose of the tests.
-            {amqqueue_max_restart_intensity, {1000000, 1}},
-            %% We reduce the segment_entry_count values to make using multiple segments more likely.
-            {queue_index_segment_entry_count, 512},
-            {classic_queue_index_v2_segment_entry_count, 512}
+%            {server_proc_max_restart_intensity, {1000000, 1}}
         ]}]}
       ]),
     Config2 = rabbit_ct_helpers:run_steps(Config1,
@@ -117,33 +109,33 @@ init_per_group(Group = classic_queue_tests, Config) ->
         erlang, system_flag, [backtrace_depth, 16]),
     Config2.
 
-end_per_group(classic_queue_tests, Config) ->
+end_per_group(quorum_queue_tests, Config) ->
     rabbit_ct_helpers:run_steps(Config,
       rabbit_ct_client_helpers:teardown_steps() ++
       rabbit_ct_broker_helpers:teardown_steps()).
 
 %% $ make -C deps/rabbit test-build
 %% $ erl -pa deps/rabbit/test
-%% > classic_queue_prop_SUITE:instrs_to_manual([[{init,...},...]]).
+%% > quorum_queue_prop_SUITE:instrs_to_manual([[{init,...},...]]).
 %% Paste into do_manual/1.
 %% Enable manual as the only test in groups/0.
-%% $ make -C deps/rabbit ct-classic_queue_prop
+%% $ make -C deps/rabbit ct-quorum_queue_prop
 instrs_to_manual([Instrs]) ->
     io:format("~ndo_manual(Config) ->~n~n"),
     lists:foreach(fun
-        ({init, CQ}) ->
-            #cq{name=Name, mode=Mode, version=Version} = CQ,
-            io:format("    St0 = #cq{name=~0p, mode=~0p, version=~0p,~n"
+        ({init, QQ}) ->
+            #qq{name=Name} = QQ,
+            io:format("    St0 = #qq{name=~0p,~n"
                       "              config=minimal_config(Config)},~n~n",
-                      [Name, Mode, Version]);
+                      [Name]);
         ({set, {var,Var}, {call, ?MODULE, cmd_setup_queue, _}}) ->
             Res = "Res" ++ integer_to_list(Var),
             PrevSt = "St" ++ integer_to_list(Var - 1),
             St = "St" ++ integer_to_list(Var),
             io:format("    ~s = cmd_setup_queue(~s),~n"
-                      "    ~s = ~s#cq{amq=~s},~n~n",
+                      "    ~s = ~s#qq{amq=~s},~n~n",
                       [Res, PrevSt, St, PrevSt, Res]);
-        ({set, {var,Var}, {call, ?MODULE, Cmd, [#cq{}|Args]}}) ->
+        ({set, {var,Var}, {call, ?MODULE, Cmd, [#qq{}|Args]}}) ->
             Res = "Res" ++ integer_to_list(Var),
             PrevSt = "St" ++ integer_to_list(Var - 1),
             St = "St" ++ integer_to_list(Var),
@@ -190,42 +182,48 @@ manual(Config) ->
 %% - Add some timer:sleep(1) or longer between commands if delays are necessary.
 %% - If a shrunk set of commands isn't good enough, the original might.
 %% - Removing some steps can help understand the sequence of events leading to the problem.
+%do_manual(Config) ->
+%    Config =:= Config.
 do_manual(Config) ->
-    Config =:= Config.
 
-classic_queue_v1(Config) ->
+    St0 = #qq{name=prop_quorum_queue,
+              config=minimal_config(Config)},
+
+    Res1 = cmd_setup_queue(St0),
+    St1 = St0#qq{amq=Res1},
+
+    do_manual_loop(St1).
+
+do_manual_loop(St1) ->
+
+    Res2 = cmd_restart_vhost_clean(St1),
+    true = postcondition(St1, {call, undefined, cmd_restart_vhost_clean, [St1]}, Res2),
+    St2 = next_state(St1, Res2, {call, undefined, cmd_restart_vhost_clean, [St1]}),
+
+    Res3 = cmd_publish_msg(St2, 6, 2, false, undefined),
+    true = postcondition(St2, {call, undefined, cmd_publish_msg, [St2, 6, 2, false, undefined]}, Res3),
+    St3 = next_state(St2, Res3, {call, undefined, cmd_publish_msg, [St2, 6, 2, false, undefined]}),
+
+    Res4 = cmd_basic_get_msg(St3),
+    true = postcondition(St3, {call, undefined, cmd_basic_get_msg, [St3]}, Res4),
+    St4 = next_state(St3, Res4, {call, undefined, cmd_basic_get_msg, [St3]}),
+
+    Res5 = cmd_publish_msg(St4, 12, 1, true, undefined),
+    true = postcondition(St4, {call, undefined, cmd_publish_msg, [St4, 12, 1, true, undefined]}, Res5),
+    St5 = next_state(St4, Res5, {call, undefined, cmd_publish_msg, [St4, 12, 1, true, undefined]}),
+
+    Res6 = cmd_basic_get_msg(St5),
+    true = postcondition(St5, {call, undefined, cmd_basic_get_msg, [St5]}, Res6),
+    St6 = next_state(St5, Res6, {call, undefined, cmd_basic_get_msg, [St5]}),
+
+    do_manual_loop(St6).
+
+quorum_queue(Config) ->
     true = rabbit_ct_broker_helpers:rpc(Config, 0,
-        ?MODULE, do_classic_queue_v1, [Config]).
+        ?MODULE, do_quorum_queue, [Config]).
 
-do_classic_queue_v1(Config) ->
-    true = proper:quickcheck(prop_classic_queue_v1(Config),
-                             [{on_output, on_output_fun()},
-                              {numtests, ?NUM_TESTS}]).
-
-lazy_queue_v1(Config) ->
-    true = rabbit_ct_broker_helpers:rpc(Config, 0,
-        ?MODULE, do_lazy_queue_v1, [Config]).
-
-do_lazy_queue_v1(Config) ->
-    true = proper:quickcheck(prop_lazy_queue_v1(Config),
-                             [{on_output, on_output_fun()},
-                              {numtests, ?NUM_TESTS}]).
-
-classic_queue_v2(Config) ->
-    true = rabbit_ct_broker_helpers:rpc(Config, 0,
-        ?MODULE, do_classic_queue_v2, [Config]).
-
-do_classic_queue_v2(Config) ->
-    true = proper:quickcheck(prop_classic_queue_v2(Config),
-                             [{on_output, on_output_fun()},
-                              {numtests, ?NUM_TESTS}]).
-
-lazy_queue_v2(Config) ->
-    true = rabbit_ct_broker_helpers:rpc(Config, 0,
-        ?MODULE, do_lazy_queue_v2, [Config]).
-
-do_lazy_queue_v2(Config) ->
-    true = proper:quickcheck(prop_lazy_queue_v2(Config),
+do_quorum_queue(Config) ->
+    true = proper:quickcheck(prop_quorum_queue(Config),
                              [{on_output, on_output_fun()},
                               {numtests, ?NUM_TESTS}]).
 
@@ -239,38 +237,22 @@ on_output_fun() ->
 
 %% Properties.
 
-prop_classic_queue_v1(Config) ->
+prop_quorum_queue(Config) ->
     {ok, LimiterPid} = rabbit_limiter:start_link(no_id),
-    InitialState = #cq{name=?FUNCTION_NAME, mode=default, version=1,
-                       config=minimal_config(Config), limiter=LimiterPid},
-    prop_common(InitialState).
-
-prop_lazy_queue_v1(Config) ->
-    {ok, LimiterPid} = rabbit_limiter:start_link(no_id),
-    InitialState = #cq{name=?FUNCTION_NAME, mode=lazy, version=1,
-                       config=minimal_config(Config), limiter=LimiterPid},
-    prop_common(InitialState).
-
-prop_classic_queue_v2(Config) ->
-    {ok, LimiterPid} = rabbit_limiter:start_link(no_id),
-    InitialState = #cq{name=?FUNCTION_NAME, mode=default, version=2,
-                       config=minimal_config(Config), limiter=LimiterPid},
-    prop_common(InitialState).
-
-prop_lazy_queue_v2(Config) ->
-    {ok, LimiterPid} = rabbit_limiter:start_link(no_id),
-    InitialState = #cq{name=?FUNCTION_NAME, mode=lazy, version=2,
+    InitialState = #qq{name=?FUNCTION_NAME,
                        config=minimal_config(Config), limiter=LimiterPid},
     prop_common(InitialState).
 
 prop_common(InitialState) ->
     ?FORALL(Commands, commands(?MODULE, InitialState),
-        ?TRAPEXIT(begin
+        ?TRAPEXIT(try
             {History, State, Result} = run_commands(?MODULE, Commands),
             cmd_teardown_queue(State),
             ?WHENFAIL(logger:error("History: ~p~nState: ~p~nResult: ~p",
                                    [History, State, Result]),
                       aggregate(command_names(Commands), Result =:= ok))
+        catch C:E:S ->
+            logger:error("Crash: ~p:~p ~p", [C, E, S])
         end)
     ).
 
@@ -284,14 +266,14 @@ minimal_config(Config) ->
 
 %% Commands.
 
-command(St = #cq{amq=undefined}) ->
+command(St = #qq{amq=undefined}) ->
     {call, ?MODULE, cmd_setup_queue, [St]};
 command(St) ->
     ChannelCmds = case has_channels(St) of
         false -> [];
         true -> [
             {100, {call, ?MODULE, cmd_channel_confirm_mode, [channel(St)]}},
-            {100, {call, ?MODULE, cmd_channel_close, [channel(St)]}},
+%            {100, {call, ?MODULE, cmd_channel_close, [channel(St)]}},
             {900, {call, ?MODULE, cmd_channel_publish, [St, channel(St), integer(0, 1024*1024), integer(1, 2), boolean(), expiration()]}},
             {200, {call, ?MODULE, cmd_channel_publish_many, [St, channel(St), integer(2, 512), integer(0, 1024*1024), integer(1, 2), boolean(), expiration()]}},
             {900, {call, ?MODULE, cmd_channel_wait_for_confirms, [channel(St)]}},
@@ -310,12 +292,6 @@ command(St) ->
         %% These restart the vhost or the queue.
         {100, {call, ?MODULE, cmd_restart_vhost_clean, [St]}},
         {100, {call, ?MODULE, cmd_restart_queue_dirty, [St]}},
-        %% These change internal configuration.
-        { 10, {call, ?MODULE, cmd_set_v2_check_crc32, [boolean()]}},
-        %% These set policies.
-        { 50, {call, ?MODULE, cmd_set_mode, [St, oneof([default, lazy])]}},
-        { 50, {call, ?MODULE, cmd_set_version, [St, oneof([1, 2])]}},
-        { 50, {call, ?MODULE, cmd_set_mode_version, [oneof([default, lazy]), oneof([1, 2])]}},
         %% These are direct operations using internal functions.
         { 50, {call, ?MODULE, cmd_publish_msg, [St, integer(0, 1024*1024), integer(1, 2), boolean(), expiration()]}},
         { 50, {call, ?MODULE, cmd_basic_get_msg, [St]}},
@@ -331,17 +307,17 @@ expiration() ->
         integer(0, 100) %% Up to 0.1s to make it more likely to trigger dropping messages.
     ]).
 
-has_channels(#cq{channels=Channels}) ->
+has_channels(#qq{channels=Channels}) ->
     map_size(Channels) > 0.
 
-channel(#cq{channels=Channels}) ->
+channel(#qq{channels=Channels}) ->
     elements(maps:keys(Channels)).
 
 %% Next state.
 
 next_state(St, AMQ, {call, _, cmd_setup_queue, _}) ->
-    St#cq{amq=AMQ};
-next_state(St=#cq{q=Q0, confirmed=Confirmed, uncertain=Uncertain0, channels=Channels0}, AMQ, {call, _, cmd_restart_vhost_clean, _}) ->
+    St#qq{amq=AMQ};
+next_state(St=#qq{q=Q0, confirmed=Confirmed, uncertain=Uncertain0, channels=Channels0}, AMQ, {call, _, cmd_restart_vhost_clean, _}) ->
     %% Consider all consumers canceled when the vhost restarts.
     Channels = maps:map(fun (_, ChInfo) -> ChInfo#{consumer => none} end, Channels0),
     %% The status of persistent messages that were published before the vhost restart
@@ -354,8 +330,8 @@ next_state(St=#cq{q=Q0, confirmed=Confirmed, uncertain=Uncertain0, channels=Chan
         ChQUncertain = [Msg || Msg <- ChQL, not lists:member(Msg, Confirmed)],
         {ChQUncertain ++ UncertainAcc, QAcc#{Ch => queue:from_list(ChQConfirmed)}}
     end, {Uncertain0, #{}}, Q0),
-    St#cq{amq=AMQ, q=Q, restarted=true, uncertain=Uncertain, channels=Channels};
-next_state(St=#cq{q=Q0, confirmed=Confirmed, uncertain=Uncertain0}, AMQ, {call, _, cmd_restart_queue_dirty, _}) ->
+    St#qq{amq=AMQ, q=Q, restarted=true, uncertain=Uncertain, channels=Channels};
+next_state(St=#qq{q=Q0, confirmed=Confirmed, uncertain=Uncertain0}, AMQ, {call, _, cmd_restart_queue_dirty, _}) ->
     %% The status of persistent messages that were published before the queue crash
     %% is uncertain, unless the channel is in confirms mode and confirms
     %% were received.
@@ -368,21 +344,13 @@ next_state(St=#cq{q=Q0, confirmed=Confirmed, uncertain=Uncertain0}, AMQ, {call, 
         ChQUncertain = [Msg || Msg <- ChQL, not lists:member(Msg, Confirmed)],
         {ChQUncertain ++ UncertainAcc, QAcc#{Ch => queue:from_list(ChQConfirmed)}}
     end, {Uncertain0, #{}}, Q0),
-    St#cq{amq=AMQ, q=Q, restarted=true, crashed=true, uncertain=Uncertain};
-next_state(St, _, {call, _, cmd_set_v2_check_crc32, _}) ->
-    St;
-next_state(St, _, {call, _, cmd_set_mode, [_, Mode]}) ->
-    St#cq{mode=Mode};
-next_state(St, _, {call, _, cmd_set_version, [_, Version]}) ->
-    St#cq{version=Version};
-next_state(St, _, {call, _, cmd_set_mode_version, [Mode, Version]}) ->
-    St#cq{mode=Mode, version=Version};
-next_state(St=#cq{q=Q}, Msg, {call, _, cmd_publish_msg, _}) ->
+    St#qq{amq=AMQ, q=Q, restarted=true, crashed=true, uncertain=Uncertain};
+next_state(St=#qq{q=Q}, Msg, {call, _, cmd_publish_msg, _}) ->
     IntQ = maps:get(internal, Q, queue:new()),
-    St#cq{q=Q#{internal => queue:in(Msg, IntQ)}};
+    St#qq{q=Q#{internal => queue:in(Msg, IntQ)}};
 next_state(St, empty, {call, _, cmd_basic_get_msg, _}) ->
     St;
-next_state(St=#cq{q=Q, received=Received}, Msg, {call, _, cmd_basic_get_msg, _}) ->
+next_state(St=#qq{q=Q, received=Received}, Msg, {call, _, cmd_basic_get_msg, _}) ->
     %% When there are multiple active consumers we may receive
     %% messages out of order because the commands are not running
     %% in the same order as the messages sent to channels.
@@ -394,8 +362,8 @@ next_state(St=#cq{q=Q, received=Received}, Msg, {call, _, cmd_basic_get_msg, _})
     %%
     %% For all these reasons we remove messages regardless of where
     %% they are in the queue.
-    St#cq{q=delete_message(Q, Msg), received=[Msg|Received]};
-next_state(St=#cq{q=Q, uncertain=Uncertain0}, _, {call, _, cmd_purge, _}) ->
+    St#qq{q=delete_message(Q, Msg), received=[Msg|Received]};
+next_state(St=#qq{q=Q, uncertain=Uncertain0}, _, {call, _, cmd_purge, _}) ->
     %% The status of messages that were published before a purge
     %% is uncertain in the same way as for a vhost restart or a
     %% queue crash, because the purge command does not go through
@@ -404,32 +372,32 @@ next_state(St=#cq{q=Q, uncertain=Uncertain0}, _, {call, _, cmd_purge, _}) ->
     Uncertain = maps:fold(fun(_, ChQ, Acc) ->
         queue:to_list(ChQ) ++ Acc
     end, Uncertain0, Q),
-    St#cq{q=#{}, restarted=true, uncertain=Uncertain};
-next_state(St=#cq{channels=Channels}, Ch, {call, _, cmd_channel_open, _}) ->
-    St#cq{channels=Channels#{Ch => #{consumer => none, confirms => false}}};
-next_state(St=#cq{channels=Channels}, _, {call, _, cmd_channel_close, [Ch]}) ->
-    St#cq{channels=maps:remove(Ch, Channels)};
-next_state(St=#cq{q=Q, unconfirmed=Unconfirmed, channels=Channels}, _, {call, _, cmd_channel_confirm_mode, [Ch]}) ->
+    St#qq{q=#{}, restarted=true, uncertain=Uncertain};
+next_state(St=#qq{channels=Channels}, Ch, {call, _, cmd_channel_open, _}) ->
+    St#qq{channels=Channels#{Ch => #{consumer => none, confirms => false}}};
+next_state(St=#qq{channels=Channels}, _, {call, _, cmd_channel_close, [Ch]}) ->
+    St#qq{channels=maps:remove(Ch, Channels)};
+next_state(St=#qq{q=Q, unconfirmed=Unconfirmed, channels=Channels}, _, {call, _, cmd_channel_confirm_mode, [Ch]}) ->
     %% All persistent messages sent before we enabled confirm mode will not be
     %% confirmed retroactively. We therefore need to keep track of them to avoid
     %% marking them as confirmed later on.
     ChQ = maps:get(Ch, Q, queue:new()),
     Persistent = [Msg || Msg = #amqp_msg{props=#'P_basic'{delivery_mode=2}} <- queue:to_list(ChQ)],
     ChInfo = maps:get(Ch, Channels),
-    St#cq{unconfirmed=Persistent ++ Unconfirmed,
+    St#qq{unconfirmed=Persistent ++ Unconfirmed,
           channels=Channels#{Ch => ChInfo#{confirms => true}}};
-next_state(St=#cq{q=Q}, Msg, {call, _, cmd_channel_publish, [_, Ch|_]}) ->
+next_state(St=#qq{q=Q}, Msg, {call, _, cmd_channel_publish, [_, Ch|_]}) ->
     ChQ = maps:get(Ch, Q, queue:new()),
-    St#cq{q=Q#{Ch => queue:in(Msg, ChQ)}};
-next_state(St=#cq{q=Q}, Msgs0, {call, _, cmd_channel_publish_many, [_, Ch|_]}) ->
+    St#qq{q=Q#{Ch => queue:in(Msg, ChQ)}};
+next_state(St=#qq{q=Q}, Msgs0, {call, _, cmd_channel_publish_many, [_, Ch|_]}) ->
     %% We handle {var,_} specially here but it would work for cmd_channel_publish as well.
     Msgs = case is_list(Msgs0) of
         true -> Msgs0;
         false -> [Msgs0]
     end,
     ChQ = maps:get(Ch, Q, queue:new()),
-    St#cq{q=Q#{Ch => queue:from_list(queue:to_list(ChQ) ++ Msgs)}};
-next_state(St=#cq{q=Q, confirmed=Confirmed, unconfirmed=Unconfirmed}, _, {call, _, cmd_channel_wait_for_confirms, [Ch]}) ->
+    St#qq{q=Q#{Ch => queue:from_list(queue:to_list(ChQ) ++ Msgs)}};
+next_state(St=#qq{q=Q, confirmed=Confirmed, unconfirmed=Unconfirmed}, _, {call, _, cmd_channel_wait_for_confirms, [Ch]}) ->
     %% All messages sent on the channel were confirmed. We move them
     %% to the list of confirmed messages. We might end up with
     %% duplicates in the confirmed list because we might wait
@@ -439,10 +407,10 @@ next_state(St=#cq{q=Q, confirmed=Confirmed, unconfirmed=Unconfirmed}, _, {call, 
     ChQ = maps:get(Ch, Q, queue:new()),
     %% We only keep persistent messages. Messages in Confirmed are always persistent.
     Persistent = [Msg || Msg = #amqp_msg{props=#'P_basic'{delivery_mode=2}} <- queue:to_list(ChQ), not lists:member(Msg, Unconfirmed)],
-    St#cq{confirmed=Persistent ++ Confirmed};
+    St#qq{confirmed=Persistent ++ Confirmed};
 next_state(St, empty, {call, _, cmd_channel_basic_get, _}) ->
     St;
-next_state(St=#cq{q=Q, received=Received}, Msg, {call, _, cmd_channel_basic_get, _}) ->
+next_state(St=#qq{q=Q, received=Received}, Msg, {call, _, cmd_channel_basic_get, _}) ->
     %% When there are multiple active consumers we may receive
     %% messages out of order because the commands are not running
     %% in the same order as the messages sent to channels.
@@ -454,16 +422,16 @@ next_state(St=#cq{q=Q, received=Received}, Msg, {call, _, cmd_channel_basic_get,
     %%
     %% For all these reasons we remove messages regardless of where
     %% they are in the queue.
-    St#cq{q=delete_message(Q, Msg), received=[Msg|Received]};
-next_state(St=#cq{channels=Channels}, Tag, {call, _, cmd_channel_consume, [_, Ch]}) ->
+    St#qq{q=delete_message(Q, Msg), received=[Msg|Received]};
+next_state(St=#qq{channels=Channels}, Tag, {call, _, cmd_channel_consume, [_, Ch]}) ->
     ChInfo = maps:get(Ch, Channels),
-    St#cq{consumers=true, channels=Channels#{Ch => ChInfo#{consumer => Tag}}};
-next_state(St=#cq{channels=Channels}, _, {call, _, cmd_channel_cancel, [_, Ch]}) ->
+    St#qq{consumers=true, channels=Channels#{Ch => ChInfo#{consumer => Tag}}};
+next_state(St=#qq{channels=Channels}, _, {call, _, cmd_channel_cancel, [_, Ch]}) ->
     ChInfo = maps:get(Ch, Channels),
-    St#cq{channels=Channels#{Ch => ChInfo#{consumer => none}}};
+    St#qq{channels=Channels#{Ch => ChInfo#{consumer => none}}};
 next_state(St, none, {call, _, cmd_channel_receive_and_ack, _}) ->
     St;
-next_state(St=#cq{q=Q, acked=Acked}, Msg, {call, _, cmd_channel_receive_and_ack, _}) ->
+next_state(St=#qq{q=Q, acked=Acked}, Msg, {call, _, cmd_channel_receive_and_ack, _}) ->
     %% When there are multiple active consumers we may receive
     %% messages out of order because the commands are not running
     %% in the same order as the messages sent to channels.
@@ -475,33 +443,39 @@ next_state(St=#cq{q=Q, acked=Acked}, Msg, {call, _, cmd_channel_receive_and_ack,
     %%
     %% We do not need to add the message to both acked and received
     %% because we always check acked even when crashes occurred.
-    St#cq{q=delete_message(Q, Msg), acked=[Msg|Acked]};
+    St#qq{q=delete_message(Q, Msg), acked=[Msg|Acked]};
 next_state(St, _, {call, _, cmd_channel_receive_and_requeue, _}) ->
     St;
-next_state(St=#cq{q=Q, acked=Acked}, Msg, {call, _, cmd_channel_receive_and_discard, _}) ->
+next_state(St=#qq{q=Q, acked=Acked}, Msg, {call, _, cmd_channel_receive_and_discard, _}) ->
     %% Rejecting without requeing ends up acking the message
     %% (and possibly dead-lettering) so we handle it the same
     %% as normal acks.
-    St#cq{q=delete_message(Q, Msg), acked=[Msg|Acked]};
-next_state(St=#cq{q=Q, acked=Acked}, Msgs0, {call, _, cmd_channel_receive_many_and_ack_ooo, _}) ->
+    St#qq{q=delete_message(Q, Msg), acked=[Msg|Acked]};
+next_state(St=#qq{q=Q, acked=Acked}, Msgs0, {call, _, cmd_channel_receive_many_and_ack_ooo, _}) ->
     %% We handle {var,_} specially here but it would work for cmd_channel_receive_and_ack as well.
     Msgs = case is_list(Msgs0) of
         true -> Msgs0;
         false -> [Msgs0]
     end,
-    St#cq{q=lists:foldl(fun(Msg, QF) -> delete_message(QF, Msg) end, Q, Msgs), acked=Msgs ++ Acked};
+    St#qq{q=lists:foldl(fun(Msg, QF) -> delete_message(QF, Msg) end, Q, Msgs), acked=Msgs ++ Acked};
 next_state(St, _, {call, _, cmd_channel_receive_many_and_requeue_ooo, _}) ->
     St;
-next_state(St=#cq{q=Q, acked=Acked}, Msgs0, {call, _, cmd_channel_receive_many_and_discard_ooo, _}) ->
+next_state(St=#qq{q=Q, acked=Acked}, Msgs0, {call, _, cmd_channel_receive_many_and_discard_ooo, _}) ->
     %% We handle {var,_} specially here but it would work for cmd_channel_receive_and_discard as well.
     Msgs = case is_list(Msgs0) of
         true -> Msgs0;
         false -> [Msgs0]
     end,
-    St#cq{q=lists:foldl(fun(Msg, QF) -> delete_message(QF, Msg) end, Q, Msgs), acked=Msgs ++ Acked}.
+    St#qq{q=lists:foldl(fun(Msg, QF) -> delete_message(QF, Msg) end, Q, Msgs), acked=Msgs ++ Acked}.
 
 %% We remove at most one message anywhere in the queue.
-delete_message(Qs0, Msg) ->
+delete_message(Qs0, Msg0) ->
+    Msg = try element(1, Msg0) of
+        amqp_msg -> msg_without_headers(Msg0);
+        _ -> Msg0
+    catch _:_ ->
+        Msg0
+    end,
     {Qs, _} = maps:fold(fun
         (Ch, ChQ, {Qs1, true}) ->
             {Qs1#{Ch => ChQ}, true};
@@ -523,29 +497,29 @@ delete_message(Qs0, Msg) ->
 
 %% Preconditions.
 %%
-%% We cannot rely on the data found in #cq.q here because when we are
-%% in a symbolic context we cannot remove the messages from #cq.q
+%% We cannot rely on the data found in #qq.q here because when we are
+%% in a symbolic context we cannot remove the messages from #qq.q
 %% (since we are always getting a new {var,integer()}).
 
-precondition(#cq{amq=AMQ}, {call, _, cmd_restart_vhost_clean, _}) ->
+precondition(#qq{amq=AMQ}, {call, _, cmd_restart_vhost_clean, _}) ->
     AMQ =/= undefined;
-precondition(#cq{amq=AMQ}, {call, _, cmd_restart_queue_dirty, _}) ->
+precondition(#qq{amq=AMQ}, {call, _, cmd_restart_queue_dirty, _}) ->
     AMQ =/= undefined;
-precondition(#cq{channels=Channels}, {call, _, cmd_channel_confirm_mode, [Ch]}) ->
+precondition(#qq{channels=Channels}, {call, _, cmd_channel_confirm_mode, [Ch]}) ->
     %% Only enabled confirms if they were not already enabled.
     %% Otherwise it is a no-op so not a big problem but this
     %% reduces the quality of the test runs.
     maps:get(confirms, maps:get(Ch, Channels)) =:= false;
-precondition(#cq{channels=Channels}, {call, _, cmd_channel_wait_for_confirms, [Ch]}) ->
+precondition(#qq{channels=Channels}, {call, _, cmd_channel_wait_for_confirms, [Ch]}) ->
     %% Only wait for confirms when they were enabled.
     maps:get(confirms, maps:get(Ch, Channels)) =:= true;
-precondition(#cq{channels=Channels}, {call, _, Cmd, [_, Ch]}) when
+precondition(#qq{channels=Channels}, {call, _, Cmd, [_, Ch]}) when
         %% Using both consume and basic_get is non-deterministic.
         Cmd =:= cmd_channel_basic_get;
         %% Don't consume if we are already consuming on this channel.
         Cmd =:= cmd_channel_consume ->
     maps:get(consumer, maps:get(Ch, Channels)) =:= none;
-precondition(#cq{channels=Channels}, {call, _, Cmd, [_, Ch|_]}) when
+precondition(#qq{channels=Channels}, {call, _, Cmd, [_, Ch|_]}) when
         %% Only cancel/receive when we are already consuming on this channel.
         Cmd =:= cmd_channel_cancel; Cmd =:= cmd_channel_receive_and_ack;
         Cmd =:= cmd_channel_receive_and_requeue; Cmd =:= cmd_channel_receive_and_discard;
@@ -560,16 +534,6 @@ precondition(_, _) ->
 postcondition(_, {call, _, Cmd, _}, Q) when
         Cmd =:= cmd_setup_queue; Cmd =:= cmd_restart_vhost_clean; Cmd =:= cmd_restart_queue_dirty ->
     element(1, Q) =:= amqqueue;
-postcondition(_, {call, _, cmd_set_v2_check_crc32, _}, Res) ->
-    Res =:= ok;
-postcondition(#cq{amq=AMQ}, {call, _, cmd_set_mode, [_, Mode]}, _) ->
-    do_check_queue_mode(AMQ, Mode) =:= ok;
-postcondition(#cq{amq=AMQ}, {call, _, cmd_set_version, [_, Version]}, _) ->
-    do_check_queue_version(AMQ, Version) =:= ok;
-postcondition(#cq{amq=AMQ}, {call, _, cmd_set_mode_version, [Mode, Version]}, _) ->
-    (do_check_queue_mode(AMQ, Mode) =:= ok)
-    andalso
-    (do_check_queue_version(AMQ, Version) =:= ok);
 postcondition(_, {call, _, cmd_publish_msg, _}, Msg) ->
     is_record(Msg, amqp_msg);
 postcondition(_, {call, _, cmd_purge, _}, Res) ->
@@ -592,25 +556,28 @@ postcondition(_, {call, _, cmd_channel_cancel, _}, _) ->
     true;
 postcondition(St, {call, _, Cmd, Args}, empty) when
         Cmd =:= cmd_basic_get_msg; Cmd =:= cmd_channel_basic_get ->
-    Ch = case Cmd of
-        cmd_basic_get_msg -> internal;
-        cmd_channel_basic_get -> lists:nth(2, Args)
-    end,
-    %% We may get 'empty' if there are/were consumers and the messages are
-    %% in transit.
-    has_consumers(St) orelse
-    %% Due to the asynchronous nature of publishing it may be
-    %% possible to have published a message but an immediate basic.get
-    %% on a separate channel cannot retrieve it. In that case we accept
-    %% an empty return value only if the channel we are calling
-    %% basic.get on has no messages published and not consumed.
-    not queue_has_channel(St, Ch) orelse
-    %% When messages can expire they will never be removed from the
-    %% property state because we cannot know whether the message
-    %% will be received later on (it was in transit when it expired).
-    %% Therefore we accept an empty response if all messages
-    %% sent via this particular channel have an expiration.
-    queue_part_all_expired(St, Ch);
+%% @todo Explain that this is because some commands have lower priority (the publish).
+
+%    Ch = case Cmd of
+%        cmd_basic_get_msg -> internal;
+%        cmd_channel_basic_get -> lists:nth(2, Args)
+%    end,
+%    %% We may get 'empty' if there are/were consumers and the messages are
+%    %% in transit.
+%    has_consumers(St) orelse
+%    %% Due to the asynchronous nature of publishing it may be
+%    %% possible to have published a message but an immediate basic.get
+%    %% on a separate channel cannot retrieve it. In that case we accept
+%    %% an empty return value only if the channel we are calling
+%    %% basic.get on has no messages published and not consumed.
+%    not queue_has_channel(St, Ch) orelse
+%    %% When messages can expire they will never be removed from the
+%    %% property state because we cannot know whether the message
+%    %% will be received later on (it was in transit when it expired).
+%    %% Therefore we accept an empty response if all messages
+%    %% sent via this particular channel have an expiration.
+%    queue_part_all_expired(St, Ch);
+    true;
 postcondition(St, {call, _, Cmd, _}, Msg) when
         Cmd =:= cmd_basic_get_msg; Cmd =:= cmd_channel_basic_get ->
     %% When there are active consumers we may receive
@@ -664,13 +631,14 @@ postcondition(St, {call, _, Cmd, _}, Msgs) when
 
 %% This function returns 'true' when there was a consumer at some point
 %% even if consumers were recently cancelled or closed.
-has_consumers(#cq{consumers=Consumers}) ->
+has_consumers(#qq{consumers=Consumers}) ->
     Consumers.
 
-queue_has_channel(#cq{q=Q}, Ch) ->
+queue_has_channel(#qq{q=Q}, Ch) ->
     maps:is_key(Ch, Q).
 
-queue_head_has_msg(#cq{q=Qs}, Msg) ->
+queue_head_has_msg(#qq{q=Qs}, Msg0) ->
+    Msg = msg_without_headers(Msg0),
     maps:fold(fun
         (_, _, true) ->
             true;
@@ -693,7 +661,8 @@ queue_head_has_msg(#cq{q=Qs}, Msg) ->
             Res =:= true
     end, false, Qs).
 
-queue_has_msg(#cq{q=Qs}, Msg) ->
+queue_has_msg(#qq{q=Qs}, Msg0) ->
+    Msg = msg_without_headers(Msg0),
     maps:fold(fun
         (_, _, true) ->
             true;
@@ -701,7 +670,7 @@ queue_has_msg(#cq{q=Qs}, Msg) ->
             queue:member(Msg, ChQ)
     end, false, Qs).
 
-queue_part_all_expired(#cq{q=Qs}, Key) ->
+queue_part_all_expired(#qq{q=Qs}, Key) ->
     queue_all(fun(#amqp_msg{props=#'P_basic'{expiration=Expiration}}) ->
         Expiration =/= undefined
     end, maps:get(Key, Qs)).
@@ -711,13 +680,15 @@ queue_part_all_expired(#cq{q=Qs}, Key) ->
 %% vhost was restarting at the same time. Unfortunately the
 %% current implementation means that we cannot detect
 %% "receive, ack, receive again" errors after a restart.
-restarted_and_previously_acked(#cq{restarted=Restarted, acked=Acked}, Msg) ->
+restarted_and_previously_acked(#qq{restarted=Restarted, acked=Acked}, Msg0) ->
+    Msg = msg_without_headers(Msg0),
     Restarted andalso lists:member(Msg, Acked).
 
 %% Some messages may have been published but lost during the
 %% restart (without publisher confirms). Messages we are
 %% uncertain about are kept in a separate list after restart.
-restarted_and_uncertain_publish_status(#cq{uncertain=Uncertain}, Msg) ->
+restarted_and_uncertain_publish_status(#qq{uncertain=Uncertain}, Msg0) ->
+    Msg = msg_without_headers(Msg0),
     lists:member(Msg, Uncertain).
 
 %% We may receive messages that were previously received
@@ -727,34 +698,32 @@ restarted_and_uncertain_publish_status(#cq{uncertain=Uncertain}, Msg) ->
 %% "receive, ack, receive again" errors after a crash
 %% (because that's something we have to accept when
 %% crashes occur).
-crashed_and_previously_received(#cq{crashed=Crashed, received=Received}, Msg) ->
+crashed_and_previously_received(#qq{crashed=Crashed, received=Received}, Msg0) ->
+    Msg = msg_without_headers(Msg0),
     Crashed andalso lists:member(Msg, Received).
+
+%% @todo Explain why x-delivery-count annoys us.
+msg_without_headers(Msg=#amqp_msg{props=Props}) ->
+    Msg#amqp_msg{props=Props#'P_basic'{headers=undefined}}.
 
 %% Helpers.
 
-cmd_setup_queue(St=#cq{name=Name, mode=Mode, version=Version}) ->
+cmd_setup_queue(St=#qq{name=Name}) ->
     ?DEBUG("~0p", [St]),
     IsDurable = true, %% We want to be able to restart the queue process.
     IsAutoDelete = false,
-    %% We cannot use args to set mode/version as the arguments override
-    %% the policies and we also want to test policy changes.
-    cmd_set_mode_version(Mode, Version),
     Args = [
-%        {<<"x-queue-mode">>, longstr, atom_to_binary(Mode, utf8)},
-%        {<<"x-queue-version">>, long, Version}
+        {<<"x-queue-type">>, longstr, <<"quorum">>}
     ],
     QName = rabbit_misc:r(<<"/">>, queue, iolist_to_binary([atom_to_binary(Name, utf8), $_,
                                                             integer_to_binary(erlang:unique_integer([positive]))])),
     {new, AMQ} = rabbit_amqqueue:declare(QName, IsDurable, IsAutoDelete, Args, none, <<"acting-user">>),
-    %% We check that the queue was creating with the right mode/version.
-    ok = do_check_queue_mode(AMQ, Mode),
-    ok = do_check_queue_version(AMQ, Version),
     AMQ.
 
-cmd_teardown_queue(St=#cq{amq=undefined}) ->
+cmd_teardown_queue(St=#qq{amq=undefined}) ->
     ?DEBUG("~0p", [St]),
     ok;
-cmd_teardown_queue(St=#cq{amq=AMQ, channels=Channels}) ->
+cmd_teardown_queue(St=#qq{amq=AMQ, channels=Channels}) ->
     ?DEBUG("~0p", [St]),
     %% We must close all channels since we will not be using them anymore.
     %% Otherwise we end up wasting resources and may hit per-(direct)-connection limits.
@@ -767,10 +736,15 @@ cmd_teardown_queue(St=#cq{amq=AMQ, channels=Channels}) ->
     rabbit_policy:delete(<<"/">>, <<"queue-mode-version-policy">>, <<"acting-user">>),
     ok.
 
-cmd_restart_vhost_clean(St=#cq{amq=AMQ0}) ->
+cmd_restart_vhost_clean(St=#qq{amq=AMQ0}) ->
     ?DEBUG("~0p", [St]),
+    Pid = whereis(element(1,rabbit_amqqueue:pid_of(AMQ0))),
+%    dbg:tracer(process, {fun (Msg, _) -> file:write_file("/tmp/out.txt", io_lib:format("~p~n", [Msg]), [append]) end, ok}),
+%    dbg:p(Pid, [m, p, s, r]),
+%    timer:sleep(1000),
     rabbit_amqqueue:stop(<<"/">>),
     {Recovered, []} = rabbit_amqqueue:recover(<<"/">>),
+    %% @todo This one doesn't do anything for quorum.
     rabbit_amqqueue:start(Recovered),
     %% We must lookup the new AMQ value because the state has changed,
     %% notably the pid of the queue process is now different.
@@ -778,83 +752,38 @@ cmd_restart_vhost_clean(St=#cq{amq=AMQ0}) ->
     %% We cannot use the AMQ found in Recovered directly because it is
     %% in 'stopped' state. We have to look up the most recent value.
     {ok, AMQ} = rabbit_amqqueue:lookup(amqqueue:get_name(AMQ0)),
-    AMQ.
+    Pid2 = whereis(element(1,rabbit_amqqueue:pid_of(AMQ0))),
+%    dbg:p(Pid2, [m, p, s, r]),
+%    logger:error("cmd_restart_vhost_clean: ~p -> ~p", [Pid, Pid2]),
+    AMQ. %% @todo This doesn't change. We don't need to return it.
 
-cmd_restart_queue_dirty(St=#cq{amq=AMQ}) ->
+cmd_restart_queue_dirty(St=#qq{amq=AMQ}) ->
     ?DEBUG("~0p", [St]),
-    Pid = rabbit_amqqueue:pid_of(AMQ),
+    Pid = whereis(element(1, rabbit_amqqueue:pid_of(AMQ))),
     exit(Pid, kill),
-    %% We must lookup the new AMQ value because the state has changed,
-    %% notably the pid of the queue process is now different.
-    Res = do_wait_updated_amqqueue(amqqueue:get_name(AMQ), Pid),
+    %% We must wait for the new ra_server_proc to restart before
+    %% we can issue certain commands, like dirty restarts.
+    do_wait_restarted_ra_server(rabbit_amqqueue:pid_of(AMQ), Pid),
     %% We make the channels drop the pending confirms because
     %% they will be lost due to the crash.
-    #cq{channels=Channels} = St,
+    #qq{channels=Channels} = St,
     _ = [
         amqp_channel:wait_for_confirms(Ch, {1, second})
     || {Ch, #{confirms := true}} <- maps:to_list(Channels)],
-    Res.
+    AMQ. %% @todo This doesn't change. We don't need to return it.
 
-do_wait_updated_amqqueue(Name, Pid) ->
+do_wait_restarted_ra_server(Name, Pid) ->
     timer:sleep(1),
-    {ok, AMQ} = rabbit_amqqueue:lookup(Name),
-    case rabbit_amqqueue:pid_of(AMQ) of
+    case whereis(element(1, Name)) of
         Pid ->
-            do_wait_updated_amqqueue(Name, Pid);
+            do_wait_restarted_ra_server(Name, Pid);
+        undefined ->
+            do_wait_restarted_ra_server(Name, Pid);
         _ ->
-            AMQ
+            ok
     end.
 
-cmd_set_v2_check_crc32(Value) ->
-    application:set_env(rabbit, classic_queue_store_v2_check_crc32, Value).
-
-cmd_set_mode(St=#cq{version=Version}, Mode) ->
-    ?DEBUG("~0p ~0p", [St, Mode]),
-    do_set_policy(Mode, Version).
-
-%% We loop until the queue has switched mode.
-do_check_queue_mode(AMQ, Mode) ->
-    do_check_queue_mode(AMQ, Mode, 1000).
-
-do_check_queue_mode(_, _, 0) ->
-    error;
-do_check_queue_mode(AMQ, Mode, N) ->
-    timer:sleep(1),
-    [{backing_queue_status, Status}] = rabbit_amqqueue:info(AMQ, [backing_queue_status]),
-    case proplists:get_value(mode, Status) of
-        Mode -> ok;
-        _ -> do_check_queue_mode(AMQ, Mode, N - 1)
-    end.
-
-cmd_set_version(St=#cq{mode=Mode}, Version) ->
-    ?DEBUG("~0p ~0p", [St, Version]),
-    do_set_policy(Mode, Version).
-
-%% We loop until the queue has switched version.
-do_check_queue_version(AMQ, Version) ->
-    do_check_queue_version(AMQ, Version, 1000).
-
-do_check_queue_version(_, _, 0) ->
-    error;
-do_check_queue_version(AMQ, Version, N) ->
-    timer:sleep(1),
-    [{backing_queue_status, Status}] = rabbit_amqqueue:info(AMQ, [backing_queue_status]),
-    case proplists:get_value(version, Status) of
-        Version -> ok;
-        _ -> do_check_queue_version(AMQ, Version, N - 1)
-    end.
-
-cmd_set_mode_version(Mode, Version) ->
-    ?DEBUG("~0p ~0p", [Mode, Version]),
-    do_set_policy(Mode, Version).
-
-do_set_policy(Mode, Version) ->
-    rabbit_policy:set(<<"/">>, <<"queue-mode-version-policy">>, <<".*">>,
-        [{<<"queue-mode">>, atom_to_binary(Mode, utf8)},
-         {<<"queue-version">>, Version}],
-        0, <<"queues">>, <<"acting-user">>).
-
-cmd_publish_msg(St=#cq{amq=AMQ}, PayloadSize, DeliveryMode, Mandatory, Expiration) ->
+cmd_publish_msg(St=#qq{amq=AMQ}, PayloadSize, DeliveryMode, Mandatory, Expiration) ->
     ?DEBUG("~0p ~0p ~0p ~0p ~0p", [St, PayloadSize, DeliveryMode, Mandatory, Expiration]),
     Payload = do_rand_payload(PayloadSize),
     Msg = rabbit_basic:message(rabbit_misc:r(<<>>, exchange, <<>>),
@@ -867,7 +796,7 @@ cmd_publish_msg(St=#cq{amq=AMQ}, PayloadSize, DeliveryMode, Mandatory, Expiratio
     {MsgProps, MsgPayload} = rabbit_basic_common:from_content(Msg#basic_message.content),
     #amqp_msg{props=MsgProps, payload=MsgPayload}.
 
-cmd_basic_get_msg(St=#cq{amq=AMQ, limiter=LimiterPid}) ->
+cmd_basic_get_msg(St=#qq{amq=AMQ, limiter=LimiterPid}) ->
     ?DEBUG("~0p", [St]),
     %% The second argument means that we will not be sending an ack message.
     Res = rabbit_amqqueue:basic_get(AMQ, true, LimiterPid,
@@ -881,14 +810,17 @@ cmd_basic_get_msg(St=#cq{amq=AMQ, limiter=LimiterPid}) ->
             #amqp_msg{props=MsgProps, payload=MsgPayload}
     end.
 
-cmd_purge(St=#cq{amq=AMQ}) ->
+cmd_purge(St=#qq{amq=AMQ}) ->
     ?DEBUG("~0p", [St]),
     rabbit_amqqueue:purge(AMQ).
 
-cmd_channel_open(St=#cq{config=Config}) ->
+cmd_channel_open(St=#qq{config=Config}) ->
     ?DEBUG("~0p", [St]),
     Server = rabbit_ct_broker_helpers:get_node_config(Config, 0, nodename),
-    rabbit_ct_client_helpers:open_channel(Config, Server).
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
+    rpc:call(node(Ch), dbg, tracer, [process, {fun (Msg, _) -> file:write_file("/tmp/out.txt", io_lib:format("~p~n", [Msg]), [append]) end, ok}]),
+    rpc:call(node(Ch), dbg, p, [Ch, [m, p, s, r]]),
+    Ch.
 
 cmd_channel_confirm_mode(Ch) ->
     ?DEBUG("~0p", [Ch]),
@@ -904,7 +836,7 @@ cmd_channel_close(Ch) ->
     %% So instead we close directly.
     amqp_channel:close(Ch).
 
-cmd_channel_publish(St=#cq{amq=AMQ}, Ch, PayloadSize, DeliveryMode, Mandatory, Expiration) ->
+cmd_channel_publish(St=#qq{amq=AMQ}, Ch, PayloadSize, DeliveryMode, Mandatory, Expiration) ->
     ?DEBUG("~0p ~0p ~0p ~0p ~0p ~0p", [St, Ch, PayloadSize, DeliveryMode, Mandatory, Expiration]),
     #resource{name = Name} = amqqueue:get_name(AMQ),
     Payload = do_rand_payload(PayloadSize),
@@ -925,7 +857,7 @@ cmd_channel_wait_for_confirms(Ch) ->
     ?DEBUG("~0p", [Ch]),
     amqp_channel:wait_for_confirms(Ch, {1, second}).
 
-cmd_channel_basic_get(St=#cq{amq=AMQ}, Ch) ->
+cmd_channel_basic_get(St=#qq{amq=AMQ}, Ch) ->
     ?DEBUG("~0p ~0p", [St, Ch]),
     #resource{name = Name} = amqqueue:get_name(AMQ),
     case amqp_channel:call(Ch, #'basic.get'{queue = Name, no_ack = true}) of
@@ -935,7 +867,7 @@ cmd_channel_basic_get(St=#cq{amq=AMQ}, Ch) ->
             Msg
     end.
 
-cmd_channel_consume(St=#cq{amq=AMQ}, Ch) ->
+cmd_channel_consume(St=#qq{amq=AMQ}, Ch) ->
     ?DEBUG("~0p ~0p", [St, Ch]),
     %% We register ourselves as a default consumer to avoid race conditions
     %% when we try to cancel the channel after the server has already canceled
@@ -950,7 +882,7 @@ cmd_channel_consume(St=#cq{amq=AMQ}, Ch) ->
     receive #'basic.consume_ok'{consumer_tag = Tag} -> ok end,
     Tag.
 
-cmd_channel_cancel(St=#cq{channels=Channels}, Ch) ->
+cmd_channel_cancel(St=#qq{channels=Channels}, Ch) ->
     ?DEBUG("~0p ~0p", [St, Ch]),
     #{consumer := Tag} = maps:get(Ch, Channels),
     #'basic.cancel_ok'{} =
@@ -959,7 +891,7 @@ cmd_channel_cancel(St=#cq{channels=Channels}, Ch) ->
     %% We have to requeue the messages in transit to preserve ordering.
     do_receive_requeue_all(Ch, Tag).
 
-cmd_channel_receive_and_ack(St=#cq{channels=Channels}, Ch) ->
+cmd_channel_receive_and_ack(St=#qq{channels=Channels}, Ch) ->
     ?DEBUG("~0p ~0p", [St, Ch]),
     #{consumer := Tag} = maps:get(Ch, Channels),
     receive
@@ -971,7 +903,7 @@ cmd_channel_receive_and_ack(St=#cq{channels=Channels}, Ch) ->
         none
     end.
 
-cmd_channel_receive_and_requeue(St=#cq{channels=Channels}, Ch) ->
+cmd_channel_receive_and_requeue(St=#qq{channels=Channels}, Ch) ->
     ?DEBUG("~0p ~0p", [St, Ch]),
     #{consumer := Tag} = maps:get(Ch, Channels),
     receive
@@ -983,7 +915,7 @@ cmd_channel_receive_and_requeue(St=#cq{channels=Channels}, Ch) ->
         none
     end.
 
-cmd_channel_receive_and_discard(St=#cq{channels=Channels}, Ch) ->
+cmd_channel_receive_and_discard(St=#qq{channels=Channels}, Ch) ->
     ?DEBUG("~0p ~0p", [St, Ch]),
     #{consumer := Tag} = maps:get(Ch, Channels),
     receive
@@ -995,7 +927,7 @@ cmd_channel_receive_and_discard(St=#cq{channels=Channels}, Ch) ->
         none
     end.
 
-cmd_channel_receive_many_and_ack_ooo(St=#cq{channels=Channels}, Ch, Num) ->
+cmd_channel_receive_many_and_ack_ooo(St=#qq{channels=Channels}, Ch, Num) ->
     ?DEBUG("~0p ~0p ~0p", [St, Ch, Num]),
     #{consumer := Tag} = maps:get(Ch, Channels),
     do_cmd_channel_receive_many_and_ack_ooo_loop(Tag, Ch, Num, [], []).
@@ -1013,7 +945,7 @@ do_cmd_channel_receive_many_and_ack_ooo_loop(Tag, Ch, Num, TagAcc, MsgAcc) ->
         do_cmd_channel_receive_many_and_ack_ooo_loop(Tag, Ch, 0, TagAcc, MsgAcc)
     end.
 
-cmd_channel_receive_many_and_requeue_ooo(St=#cq{channels=Channels}, Ch, Num) ->
+cmd_channel_receive_many_and_requeue_ooo(St=#qq{channels=Channels}, Ch, Num) ->
     ?DEBUG("~0p ~0p ~0p", [St, Ch, Num]),
     #{consumer := Tag} = maps:get(Ch, Channels),
     do_cmd_channel_receive_many_and_requeue_ooo_loop(Tag, Ch, Num, [], []).
@@ -1031,7 +963,7 @@ do_cmd_channel_receive_many_and_requeue_ooo_loop(Tag, Ch, Num, TagAcc, MsgAcc) -
         do_cmd_channel_receive_many_and_requeue_ooo_loop(Tag, Ch, 0, TagAcc, MsgAcc)
     end.
 
-cmd_channel_receive_many_and_discard_ooo(St=#cq{channels=Channels}, Ch, Num) ->
+cmd_channel_receive_many_and_discard_ooo(St=#qq{channels=Channels}, Ch, Num) ->
     ?DEBUG("~0p ~0p ~0p", [St, Ch, Num]),
     #{consumer := Tag} = maps:get(Ch, Channels),
     do_cmd_channel_receive_many_and_discard_ooo_loop(Tag, Ch, Num, [], []).
