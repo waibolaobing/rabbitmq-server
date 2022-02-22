@@ -76,8 +76,8 @@ all() ->
 
 groups() ->
     [{quorum_queue_tests, [], [
-        manual
-%        quorum_queue
+%        manual
+        quorum_queue
     ]}].
 
 init_per_suite(Config) ->
@@ -753,6 +753,7 @@ cmd_restart_vhost_clean(St=#qq{amq=AMQ0}) ->
     %% in 'stopped' state. We have to look up the most recent value.
     {ok, AMQ} = rabbit_amqqueue:lookup(amqqueue:get_name(AMQ0)),
     Pid2 = whereis(element(1,rabbit_amqqueue:pid_of(AMQ0))),
+    do_wait_leader_ra_server(Pid2),
 %    dbg:p(Pid2, [m, p, s, r]),
 %    logger:error("cmd_restart_vhost_clean: ~p -> ~p", [Pid, Pid2]),
     AMQ. %% @todo This doesn't change. We don't need to return it.
@@ -763,7 +764,8 @@ cmd_restart_queue_dirty(St=#qq{amq=AMQ}) ->
     exit(Pid, kill),
     %% We must wait for the new ra_server_proc to restart before
     %% we can issue certain commands, like dirty restarts.
-    do_wait_restarted_ra_server(rabbit_amqqueue:pid_of(AMQ), Pid),
+    Pid2 = do_wait_restarted_ra_server(rabbit_amqqueue:pid_of(AMQ), Pid),
+    do_wait_leader_ra_server(Pid2),
     %% We make the channels drop the pending confirms because
     %% they will be lost due to the crash.
     #qq{channels=Channels} = St,
@@ -779,8 +781,16 @@ do_wait_restarted_ra_server(Name, Pid) ->
             do_wait_restarted_ra_server(Name, Pid);
         undefined ->
             do_wait_restarted_ra_server(Name, Pid);
-        _ ->
-            ok
+        RestartedPid ->
+            RestartedPid
+    end.
+
+do_wait_leader_ra_server(Pid) ->
+    case ra_server_proc:ping(Pid, 1000) of
+        {pong, leader} ->
+            ok;
+        {pong, follower} ->
+            do_wait_leader_ra_server(Pid)
     end.
 
 cmd_publish_msg(St=#qq{amq=AMQ}, PayloadSize, DeliveryMode, Mandatory, Expiration) ->
