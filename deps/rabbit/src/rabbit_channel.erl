@@ -2188,6 +2188,19 @@ deliver_to_queues({Delivery = #delivery{message    = Message = #basic_message{ex
                     ok
             end,
             State;
+        %% When sending to QQs we may get an error when the process shuts
+        %% down or gets killed. In that case we retry.
+        %%
+        %% We do not need to worry about infinite loops because this
+        %% is only sent when the process exits.
+        %%
+        %% @todo This probably is not completely right, if delivering
+        %%       to both CQ and QQ we may end up delivering twice to
+        %%       the CQ?
+        {error, {shutdown, _}} ->
+            deliver_to_queues({Delivery, [QName]}, State0);
+        {error, {killed, _}} ->
+            deliver_to_queues({Delivery, [QName]}, State0);
         {error, {stream_not_found, Resource}} ->
             rabbit_misc:protocol_error(
               resource_error,
