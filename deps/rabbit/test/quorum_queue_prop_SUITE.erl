@@ -761,10 +761,16 @@ cmd_restart_vhost_clean(St=#qq{amq=AMQ0}) ->
 cmd_restart_queue_dirty(St=#qq{amq=AMQ}) ->
     ?DEBUG("~0p", [St]),
     Pid = whereis(element(1, rabbit_amqqueue:pid_of(AMQ))),
-    exit(Pid, kill),
+    [{_, SystemSup, supervisor, _}] = [Child || Child={quorum_queues, _, _, _} <- supervisor:which_children(ra_systems_sup)],
+    AllPidsToKill = [SystemSup] ++ lists:flatten(do_get_all_system_pids(SystemSup)),
+    _ = [sys:suspend(P) || P <- AllPidsToKill],
+    _ = [exit(P, kill) || P <- AllPidsToKill],
+    do_wait_stopped_ra_server(Pid),
+    do_wait_started_ra_server_sup_sup(),
+    ok = ra:restart_server(quorum_queues, rabbit_amqqueue:pid_of(AMQ)),
     %% We must wait for the new ra_server_proc to restart before
     %% we can issue certain commands, like dirty restarts.
-    Pid2 = do_wait_restarted_ra_server(rabbit_amqqueue:pid_of(AMQ), Pid),
+    Pid2 = do_wait_restarted_ra_server(rabbit_amqqueue:pid_of(AMQ)),
     do_wait_leader_ra_server(Pid2),
     %% We make the channels drop the pending confirms because
     %% they will be lost due to the crash.
@@ -774,13 +780,31 @@ cmd_restart_queue_dirty(St=#qq{amq=AMQ}) ->
     || {Ch, #{confirms := true}} <- maps:to_list(Channels)],
     AMQ. %% @todo This doesn't change. We don't need to return it.
 
-do_wait_restarted_ra_server(Name, Pid) ->
+do_get_all_system_pids(Sup) ->
+    [case Child of
+        {_, Pid, worker, _} -> Pid;
+        {_, Pid, supervisor, _} -> [Pid] ++ do_get_all_system_pids(Pid)
+    end || Child <- supervisor:which_children(Sup)].
+
+do_wait_stopped_ra_server(Pid) ->
+    timer:sleep(1),
+    case is_process_alive(Pid) of
+        true -> do_wait_stopped_ra_server(Pid);
+        false -> ok
+    end.
+
+do_wait_started_ra_server_sup_sup() ->
+    timer:sleep(1),
+    case whereis(ra_server_sup_sup) of
+        undefined -> do_wait_started_ra_server_sup_sup();
+        _ -> ok
+    end.
+
+do_wait_restarted_ra_server(Name) ->
     timer:sleep(1),
     case whereis(element(1, Name)) of
-        Pid ->
-            do_wait_restarted_ra_server(Name, Pid);
         undefined ->
-            do_wait_restarted_ra_server(Name, Pid);
+            do_wait_restarted_ra_server(Name);
         RestartedPid ->
             RestartedPid
     end.
