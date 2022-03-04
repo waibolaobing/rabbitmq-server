@@ -76,8 +76,8 @@ all() ->
 
 groups() ->
     [{quorum_queue_tests, [], [
-%        manual
-        quorum_queue
+        manual
+%        quorum_queue
     ]}].
 
 init_per_suite(Config) ->
@@ -196,27 +196,57 @@ do_manual(Config) ->
 
 do_manual_loop(St1) ->
 
-    Res2 = cmd_restart_vhost_clean(St1),
-    true = postcondition(St1, {call, undefined, cmd_restart_vhost_clean, [St1]}, Res2),
-    St2 = next_state(St1, Res2, {call, undefined, cmd_restart_vhost_clean, [St1]}),
+    %% There has to be a message with a low expiry (or low enough) to trigger the issue.
+    Res2 = cmd_publish_msg(St1, 5, 2, true, 1),
+    true = postcondition(St1, {call, undefined, cmd_publish_msg, [St1, 5, 2, true, 1]}, Res2),
+    St2 = next_state(St1, Res2, {call, undefined, cmd_publish_msg, [St1, 5, 2, true, 1]}),
+%   St2 = St1,
 
-    Res3 = cmd_publish_msg(St2, 6, 2, false, undefined),
-    true = postcondition(St2, {call, undefined, cmd_publish_msg, [St2, 6, 2, false, undefined]}, Res3),
-    St3 = next_state(St2, Res3, {call, undefined, cmd_publish_msg, [St2, 6, 2, false, undefined]}),
+    Res3 = cmd_restart_queue_dirty(St2),
+    true = postcondition(St2, {call, undefined, cmd_restart_queue_dirty, [St2]}, Res3),
+    St3 = next_state(St2, Res3, {call, undefined, cmd_restart_queue_dirty, [St2]}),
+%   St3 = St2,
 
     Res4 = cmd_basic_get_msg(St3),
     true = postcondition(St3, {call, undefined, cmd_basic_get_msg, [St3]}, Res4),
     St4 = next_state(St3, Res4, {call, undefined, cmd_basic_get_msg, [St3]}),
+%   St4 = St3,
+    logger:error("publish before restart ~p", [Res2]),
+    logger:error("kill and restart queue and ra system"),
+    logger:error("get after restart ~p", [Res4]),
 
-    Res5 = cmd_publish_msg(St4, 12, 1, true, undefined),
-    true = postcondition(St4, {call, undefined, cmd_publish_msg, [St4, 12, 1, true, undefined]}, Res5),
-    St5 = next_state(St4, Res5, {call, undefined, cmd_publish_msg, [St4, 12, 1, true, undefined]}),
+    Res5 = cmd_channel_open(St4),
+    true = postcondition(St4, {call, undefined, cmd_channel_open, [St4]}, Res5),
+    St5 = next_state(St4, Res5, {call, undefined, cmd_channel_open, [St4]}),
 
-    Res6 = cmd_basic_get_msg(St5),
-    true = postcondition(St5, {call, undefined, cmd_basic_get_msg, [St5]}, Res6),
-    St6 = next_state(St5, Res6, {call, undefined, cmd_basic_get_msg, [St5]}),
+%    Res6 = cmd_purge(St5),
+%    true = postcondition(St5, {call, undefined, cmd_purge, [St5]}, Res6),
+%    St6 = next_state(St5, Res6, {call, undefined, cmd_purge, [St5]}),
+%    logger:error("purge ~p", [Res6]),
+    St6 = St5,
 
-    do_manual_loop(St6).
+    Res7 = cmd_channel_publish(St6, Res5, 5, 2, true, undefined),
+    true = postcondition(St6, {call, undefined, cmd_channel_publish, [St6, Res5, 5, 2, true, undefined]}, Res7),
+    St7 = next_state(St6, Res7, {call, undefined, cmd_channel_publish, [St6, Res5, 5, 2, true, undefined]}),
+
+    Res8 = cmd_channel_publish(St7, Res5, 5, 2, true, undefined),
+    true = postcondition(St7, {call, undefined, cmd_channel_publish, [St7, Res5, 5, 1, false, undefined]}, Res8),
+    St8 = next_state(St7, Res8, {call, undefined, cmd_channel_publish, [St7, Res5, 5, 1, false, undefined]}),
+
+    Res9 = cmd_channel_basic_get(St8, Res5),
+    logger:error("first publish ~p", [Res7]),
+    logger:error("second publish ~p", [Res8]),
+    logger:error("first get ~p", [Res9]),
+    logger:error("second get ~p~n~n~n~n~n", [cmd_channel_basic_get(St8, Res5)]),
+    true = postcondition(St8, {call, undefined, cmd_channel_basic_get, [St8, Res5]}, Res9),
+    St9 = next_state(St8, Res9, {call, undefined, cmd_channel_basic_get, [St8, Res5]}),
+
+%    Res10 = cmd_channel_publish(St9, Res5, 38, 2, false, undefined),
+%    true = postcondition(St9, {call, undefined, cmd_channel_publish, [St9, Res5, 38, 2, false, undefined]}, Res10),
+%    St10 = next_state(St9, Res10, {call, undefined, cmd_channel_publish, [St9, Res5, 38, 2, false, undefined]}),
+
+    true.
+%    do_manual_loop(St10).
 
 quorum_queue(Config) ->
     true = rabbit_ct_broker_helpers:rpc(Config, 0,
