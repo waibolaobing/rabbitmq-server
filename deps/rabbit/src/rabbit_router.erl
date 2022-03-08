@@ -56,7 +56,7 @@ match_routing_key(SrcName, [RoutingKey]) ->
                           [])
       end,
       fun() ->
-              rabbit_khepri:transaction(fun() -> find_routes_in_khepri(SrcName, [RoutingKey]) end)
+              find_routes_in_khepri(SrcName, [RoutingKey])
       end);
 match_routing_key(SrcName, [_|_] = RoutingKeys) ->
     rabbit_khepri:try_mnesia_or_khepri(

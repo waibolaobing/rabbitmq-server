@@ -1099,15 +1099,13 @@ match_source_in_khepri(#resource{virtual_host = VHost, name = Name}) ->
     Map.
 
 match_source_and_key_in_khepri(Src, RoutingKeys) ->
-    rabbit_khepri:transaction(
-      fun() ->
-              lists:foldl(
-                fun(RK, Acc) ->
-                        Path = khepri_routing_path(Src, RK),
-                        {ok, #{Path := Dsts}} = khepri_tx:get(Path),
-                        sets:to_list(Dsts) ++ Acc
-                end, [], RoutingKeys)
-      end).
+    lists:foldl(
+      fun(RK, Acc) ->
+              Path = khepri_routing_path(Src, RK),
+              %% Don't use transaction if we want to hit the cache
+              {ok, Dsts} = rabbit_khepri:get_data(Path),
+              sets:to_list(Dsts) ++ Acc
+      end, [], RoutingKeys).
 
 match_source_in_khepri(#resource{virtual_host = VHost, name = Name}, Type) ->
     Path = khepri_routes_path() ++ [VHost, Name, ?STAR_STAR]
