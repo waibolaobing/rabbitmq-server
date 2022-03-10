@@ -250,12 +250,10 @@ maybe_mark_unconfirmed(_, _, State) ->
 
 -spec sync(State) -> State when State::state().
 
-sync(State) ->
+sync(State = #qs{ confirms = Confirms,
+                  on_sync = OnSyncFun }) ->
     ?DEBUG("~0p", [State]),
-    flush_write_fd(State).
-
-notify_sync(State = #qs{ confirms = Confirms,
-                         on_sync = OnSyncFun }) ->
+    flush_write_fd(State),
     case gb_sets:is_empty(Confirms) of
         true ->
             State;
@@ -308,13 +306,13 @@ read_from_disk(SeqId, {?MODULE, Offset, Size}, State0) ->
     Msg = binary_to_term(MsgBin),
     {Msg, State}.
 
-get_read_fd(Segment, State0 = #qs{ read_segment = Segment,
-                                   read_fd = Fd }) ->
-    State = maybe_flush_write_fd(Segment, State0),
+get_read_fd(Segment, State = #qs{ read_segment = Segment,
+                                  read_fd = Fd }) ->
+    maybe_flush_write_fd(Segment, State),
     {ok, Fd, State};
-get_read_fd(Segment, State0 = #qs{ read_fd = OldFd }) ->
+get_read_fd(Segment, State = #qs{ read_fd = OldFd }) ->
     maybe_close_fd(OldFd),
-    State = maybe_flush_write_fd(Segment, State0),
+    maybe_flush_write_fd(Segment, State),
     case file:open(segment_file(Segment, State), [read, raw, binary]) of
         {ok, Fd} ->
             case file:read(Fd, ?HEADER_SIZE) of
@@ -336,12 +334,12 @@ get_read_fd(Segment, State0 = #qs{ read_fd = OldFd }) ->
 
 maybe_flush_write_fd(Segment, State = #qs{ write_segment = Segment }) ->
     flush_write_fd(State);
-maybe_flush_write_fd(_, State) ->
-    State.
+maybe_flush_write_fd(_, _) ->
+    ok.
 
-flush_write_fd(State = #qs{ write_fd = undefined }) ->
-    notify_sync(State);
-flush_write_fd(State = #qs{ write_fd = Fd }) ->
+flush_write_fd(#qs{ write_fd = undefined }) ->
+    ok;
+flush_write_fd(#qs{ write_fd = Fd }) ->
     %% We tell the pid handling delayed writes to flush to disk
     %% without issuing a separate command to the fd. We need
     %% to do this in order to read from a separate fd that
@@ -350,8 +348,7 @@ flush_write_fd(State = #qs{ write_fd = Fd }) ->
         module = raw_file_io_delayed, %% assert
         data = #{ pid := Pid }
     } = Fd,
-    gen_statem:call(Pid, '$synchronous_flush'),
-    notify_sync(State).
+    gen_statem:call(Pid, '$synchronous_flush').
 
 -spec check_msg_on_disk(rabbit_variable_queue:seq_id(), msg_location(), State)
         -> {ok | {error, any()}, State} when State::state().
