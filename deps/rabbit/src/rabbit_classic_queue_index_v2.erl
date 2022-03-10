@@ -740,10 +740,10 @@ flush_buffer(State0 = #qi { write_buffer = WriteBuffer0,
             end, #{}, Cache0),
             maps:merge(Cache1, AcksToCache)
     end,
-    %% Finally we update the state.
-    State#qi{ write_buffer = WriteBuffer,
-              write_buffer_updates = 0,
-              cache = Cache }.
+    %% Finally we update the state and send confirms if needed.
+    notify_sync(State#qi{ write_buffer = WriteBuffer,
+                          write_buffer_updates = 0,
+                          cache = Cache }).
 
 write_ack(SeqId, SegmentEntryCount, WritesAcc) ->
     Segment = SeqId div SegmentEntryCount,
@@ -1051,17 +1051,19 @@ parse_entries(<< Status:8,
 
 -spec sync(State) -> State when State::state().
 
-sync(State0 = #qi{ confirms = Confirms,
-                   on_sync = OnSyncFun }) ->
-    ?DEBUG("~0p", [State0]),
-    State = flush_buffer(State0, full),
+sync(State) ->
+    ?DEBUG("~0p", [State]),
+    flush_buffer(State, full).
+
+notify_sync(State = #qi{ confirms = Confirms,
+                         on_sync = OnSyncFun }) ->
     _ = case gb_sets:is_empty(Confirms) of
         true ->
-            ok;
+            State;
         false ->
-            OnSyncFun(Confirms)
-    end,
-    State#qi{ confirms = gb_sets:new() }.
+            OnSyncFun(Confirms),
+            State#qi{ confirms = gb_sets:new() }
+    end.
 
 -spec needs_sync(state()) -> 'false'.
 
