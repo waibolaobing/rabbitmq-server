@@ -340,7 +340,7 @@ maybe_flush_write_fd(_, State) ->
     State.
 
 flush_write_fd(State = #qs{ write_fd = undefined }) ->
-    State;
+    notify_sync(State);
 flush_write_fd(State = #qs{ write_fd = Fd }) ->
     %% We tell the pid handling delayed writes to flush to disk
     %% without issuing a separate command to the fd. We need
