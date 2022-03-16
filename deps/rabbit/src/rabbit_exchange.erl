@@ -321,8 +321,8 @@ lookup_in_khepri(Table, Name) ->
 
 lookup_in_khepri(Name) ->
     Path = khepri_exchange_path(Name),
-    case rabbit_khepri:get(Path) of
-        {ok, #{data := X}} -> {ok, X};
+    case rabbit_khepri:get_data(Path) of
+        {ok, X} -> {ok, X};
         _ -> {error, not_found}
     end.
 
@@ -349,16 +349,13 @@ lookup_many_in_mnesia(Names) when is_list(Names) ->
     %% expensive for reasons explained in rabbit_misc:dirty_read/1.
     lists:append([ets:lookup(rabbit_exchange, Name) || Name <- Names]).
 
-lookup_many_in_khepri([Name]) ->
-    rabbit_khepri:transaction(
-      fun() ->
-              lookup_as_list_in_khepri(Name)
-      end, ro);
 lookup_many_in_khepri(Names) when is_list(Names) ->
-    rabbit_khepri:transaction(
-      fun() ->
-              lists:append([lookup_as_list_in_khepri(Name) || Name <- Names])
-      end, ro).
+    lists:foldl(fun(Name, Acc) ->
+                        case lookup_in_khepri(Name) of
+                            {ok, X} -> [X | Acc];
+                            _ -> Acc
+                        end
+                end, [], Names).
 
 -spec lookup_or_die
         (name()) -> rabbit_types:exchange() |

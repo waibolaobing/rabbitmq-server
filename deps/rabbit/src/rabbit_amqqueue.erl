@@ -682,7 +682,14 @@ not_found_or_absent_in_khepri(Name) ->
 not_found_or_absent_dirty(Name) ->
     rabbit_khepri:try_mnesia_or_khepri(
       fun() -> not_found_or_absent_dirty_in_mnesia(Name) end,
-      fun() -> rabbit_khepri:transaction(fun() -> not_found_or_absent_in_khepri(Name) end, ro) end).
+      fun() ->
+              %% This might hit khepri cache, vs a full transaction
+              Path = khepri_durable_queue_path(Name),
+              case rabbit_khepri:get_data(Path) of
+                  {ok, Q} -> {absent, Q, nodedown}; %% Q exists on stopped node
+                  _  -> not_found
+              end
+      end).
 
 not_found_or_absent_dirty_in_mnesia(Name) ->
     %% We should read from both tables inside a tx, to get a
