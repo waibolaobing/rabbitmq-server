@@ -323,29 +323,33 @@ get_queue_type(Args) ->
     {created | existing, amqqueue:amqqueue()} | queue_absent().
 
 internal_declare(Q, Recover) ->
-    ?try_mnesia_tx_or_upgrade_amqqueue_and_retry(
-        do_internal_declare(Q, Recover),
-        begin
-            Q1 = amqqueue:upgrade(Q),
-            do_internal_declare(Q1, Recover)
-        end).
-
-do_internal_declare(Q, true) ->
     rabbit_khepri:try_mnesia_or_khepri(
       fun() ->
-              store_queue_in_mnesia(Q)
+         ?try_mnesia_tx_or_upgrade_amqqueue_and_retry(
+            do_internal_declare_in_mnesia(Q, Recover),
+            begin
+                Q1 = amqqueue:upgrade(Q),
+                do_internal_declare_in_mnesia(Q1, Recover)
+            end)
       end,
       fun() ->
-              store_queue_in_khepri_tx(Q)
-      end);
-do_internal_declare(Q, false) ->
-    rabbit_khepri:try_mnesia_or_khepri(
-      fun() ->
-              store_queue_without_recover_in_mnesia(Q)
-      end,
-      fun() ->
-              store_queue_without_recover_in_khepri(Q)
+         ?try_mnesia_tx_or_upgrade_amqqueue_and_retry(
+            do_internal_declare_in_khepri(Q, Recover),
+            begin
+                Q1 = amqqueue:upgrade(Q),
+                do_internal_declare_in_khepri(Q1, Recover)
+            end)
       end).
+
+do_internal_declare_in_mnesia(Q, true) ->
+    store_queue_in_mnesia(Q);
+do_internal_declare_in_mnesia(Q, false) ->
+    store_queue_without_recover_in_mnesia(Q).
+
+do_internal_declare_in_khepri(Q, true) ->
+    store_queue_in_khepri_tx(Q);
+do_internal_declare_in_khepri(Q, false) ->
+    store_queue_without_recover_in_khepri(Q).
 
 store_queue_in_mnesia(Q) ->
     rabbit_misc:execute_mnesia_tx_with_tail(
