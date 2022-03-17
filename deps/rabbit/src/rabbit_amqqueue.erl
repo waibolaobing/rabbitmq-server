@@ -412,10 +412,11 @@ store_queue_without_recover_in_mnesia(Q) ->
 store_queue_without_recover_in_khepri(Q) ->
     QueueName = amqqueue:get_name(Q),
     Path = khepri_queue_path(QueueName),
-    Q1 = rabbit_policy:set(Q),
-    Q2 = amqqueue:set_state(Q1, live),
+    DurablePath = khepri_durable_queue_path(QueueName),
+    Q1 = amqqueue:set_state(rabbit_policy:set(Q), live),
     Decorators = rabbit_queue_decorator:active(Q1),
-    Q3 = amqqueue:set_decorators(Q2, Decorators),
+    DurableQueue = amqqueue:reset_mirroring_and_decorators(Q1),
+    NonDurableQueue = amqqueue:set_decorators(Q1, Decorators),
     rabbit_khepri:transaction(
       fun() ->
               case khepri_tx:get(Path) of
@@ -424,14 +425,25 @@ store_queue_without_recover_in_khepri(Q) ->
                   _ ->
                       case not_found_or_absent_in_khepri(QueueName) of
                           not_found ->
-                              store_queue_in_khepri(Q2),
-                              store_queue_ram_in_khepri(Q3),
-                              {created, Q2};
+                              case ?amqqueue_is_durable(DurableQueue) of
+                                  true ->
+                                      store_queue_as_is(DurablePath, DurableQueue);
+                                  false ->
+                                      ok
+                              end,
+                              store_queue_as_is(Path, NonDurableQueue),
+                              {created, DurableQueue};
                           {absent, _, _} = R ->
                               khepri_tx:abort(R)
                       end
               end
       end).
+
+store_queue_as_is(Path, Queue) ->
+    case khepri_tx:put(Path, #kpayload_data{data = Queue}) of
+        {ok, _} -> ok;
+        Error   -> khepri_tx:abort(Error)
+    end.
 
 -spec update
         (name(), fun((amqqueue:amqqueue()) -> amqqueue:amqqueue())) ->
