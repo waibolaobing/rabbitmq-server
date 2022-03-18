@@ -230,8 +230,7 @@ store_in_mnesia(X = #exchange{durable = false}) ->
 
 store_ram_in_mnesia(X) ->
     X1 = rabbit_exchange_decorator:set(X),
-    ok = mnesia:write(rabbit_exchange, rabbit_exchange_decorator:set(X1),
-                      write),
+    ok = mnesia:write(rabbit_exchange, X1, write),
     X1.
 
 store_in_khepri(X = #exchange{durable = true}) ->
@@ -527,15 +526,21 @@ update_decorators_in_mnesia(Name) ->
               end
       end).
 
-update_decorators_in_khepri(Name) ->
-    rabbit_khepri:transaction(
-      fun() ->
-              case lookup_as_list_in_khepri(Name) of
-                  [X] -> store_ram_in_khepri(X),
-                         ok;
-                  []  -> ok
-              end
-      end).
+update_decorators_in_khepri(#resource{virtual_host = VHost, name = Name} = XName) ->
+    Path = khepri_exchange_path(XName),
+    rabbit_kepri_misc:retry(
+      fun () -> update_decorators_in_khepri(Path, VHost, Name) end).
+
+update_decorators_in_khepri(Path, VHost, Name) ->
+    case rabbit_khepri:get(Path) of
+        {ok, #{Path := #{data := X, payload_version := Vsn}}} ->
+            X1 = rabbit_exchange_decorators:set(X),
+            Conditions = #if_all{conditions = [Name, #if_payload_version{version = Vsn}]},
+            UpdatePath = khepri_exchanges_path() ++ [VHost, Conditions],
+            rabbit_khepri:put(UpdatePath, #kpayload_data{data = X1});
+        _ ->
+            ok
+    end.
 
 -spec update
         (name(),

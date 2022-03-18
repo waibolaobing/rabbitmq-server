@@ -2194,6 +2194,8 @@ internal_delete_in_khepri(QueueName, ActingUser, Reason) ->
 
 -spec forget_all_durable(node()) -> 'ok'.
 
+%% TODO this is used by `rabbit_mnesia:remove_node_if_mnesia_running`
+%% Does it make any sense once mnesia is not used/removed?
 forget_all_durable(Node) ->
     %% Note rabbit is not running so we avoid e.g. the worker pool. Also why
     %% we don't invoke the return from rabbit_binding:process_deletions/1.
@@ -2326,7 +2328,8 @@ has_synchronised_mirrors_online(Q) ->
     MirrorPids =/= [] andalso lists:any(fun rabbit_misc:is_process_alive/1, MirrorPids).
 
 -spec on_node_up(node()) -> 'ok'.
-
+%% TODO review this one with khepri clustering. It might not be needed anymore?
+%% Also when HA queues are deleted
 on_node_up(Node) ->
     ok = rabbit_misc:execute_mnesia_transaction(
            fun () ->

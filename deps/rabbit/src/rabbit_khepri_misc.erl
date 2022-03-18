@@ -12,6 +12,9 @@
 -export([execute_khepri_transaction/2]).
 -export([execute_khepri_tx_with_tail/1]).
 -export([table_filter_in_khepri/3]).
+-export([retry/1]).
+
+-define(WAIT_SECONDS, 30).
 
 execute_khepri_tx_with_tail(TxFun) ->
     case khepri_tx:is_transaction() of
@@ -61,3 +64,18 @@ execute_khepri_transaction(TxFun, PostCommitFun) ->
                             TxFun()
                     end)).
 
+retry(Fun) ->
+    Until = erlang:system_time(millisecond) + (?WAIT_SECONDS * 1000),
+    retry(Fun, Until).
+
+retry(Fun, Until) ->
+    case Fun() of
+        ok -> ok;
+        {error, Reason} ->
+            case erlang:system_time(millisecond) of
+                V when V >= Until ->
+                    throw({error, Reason});
+                _ ->
+                    retry(Fun, Until)
+            end
+    end.

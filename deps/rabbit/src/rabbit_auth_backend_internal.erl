@@ -471,16 +471,11 @@ delete_user_in_mnesia(Username) ->
         end)).
 
 delete_user_in_khepri(Username) ->
-    rabbit_khepri:transaction(
-      with_user_in_khepri(
-        Username,
-        fun() ->
-                Path = khepri_user_path(Username),
-                case khepri_tx:delete(Path) of
-                    {ok, _} -> ok;
-                    Error   -> khepri_tx:abort(Error)
-                end
-        end)).
+    Path = khepri_user_path(Username),
+    case rabbit_khepri:delete_or_fail(Path) of
+        ok -> ok;
+        _ -> throw({error, {no_such_user, Username}})
+    end.
 
 -spec lookup_user
         (rabbit_types:username()) ->
@@ -711,21 +706,21 @@ set_permissions_in_mnesia(Username, VirtualHost, UserPermission) ->
         end)).
 
 set_permissions_in_khepri(Username, VirtualHost, UserPermission) ->
+    Path = khepri_user_permission_path(
+             #if_all{conditions =
+                         [Username,
+                          #if_node_exists{exists = true}]},
+             VirtualHost),
+    %% TODO: Add a keep_while for the intermediate
+    %% 'user_permissions' node so it is removed when its last
+    %% children is removed.
+    Extra = #{keep_while =>
+                  #{rabbit_vhost:khepri_vhost_path(VirtualHost) =>
+                        #if_node_exists{exists = true}}},
     rabbit_khepri:transaction(
       rabbit_vhost:with_user_and_vhost_in_khepri(
         Username, VirtualHost,
         fun() ->
-                Path = khepri_user_permission_path(
-                         #if_all{conditions =
-                                 [Username,
-                                  #if_node_exists{exists = true}]},
-                         VirtualHost),
-                %% TODO: Add a keep_while for the intermediate
-                %% 'user_permissions' node so it is removed when its last
-                %% children is removed.
-                Extra = #{keep_while =>
-                          #{rabbit_vhost:khepri_vhost_path(VirtualHost) =>
-                            #if_node_exists{exists = true}}},
                 Ret = khepri_tx:put(
                         Path, #kpayload_data{data = UserPermission}, Extra),
                 case Ret of
@@ -782,11 +777,11 @@ clear_permissions_in_khepri(Username, VirtualHost) ->
     %% mechanism when we just want to delete something? The code and the
     %% execution would be much simpler if we just deleted the permission and
     %% be done with it.
+    Path = khepri_user_permission_path(Username, VirtualHost),
     rabbit_khepri:transaction(
       rabbit_vhost:with_user_and_vhost_in_khepri(
         Username, VirtualHost,
         fun () ->
-                Path = khepri_user_permission_path(Username, VirtualHost),
                 case khepri_tx:delete(Path) of
                     {ok, _} -> ok;
                     Error   -> khepri_tx:abort(Error)
@@ -808,11 +803,11 @@ update_user_in_mnesia(Username, Fun) ->
         end)).
 
 update_user_in_khepri(Username, Fun) ->
+    Path = khepri_user_path(Username),
     rabbit_khepri:transaction(
       with_user_in_khepri(
         Username,
         fun () ->
-                Path = khepri_user_path(Username),
                 {ok, #{Path := #{data := User}}} = khepri_tx:get(Path),
                 case khepri_tx:put(Path, #kpayload_data{data = Fun(User)}) of
                     {ok, #{Path := #{data := User}}} -> ok;
@@ -898,21 +893,21 @@ set_topic_permissions_in_mnesia(
 
 set_topic_permissions_in_khepri(
   Username, VirtualHost, Exchange, TopicPermission) ->
+    Path = khepri_topic_permission_path(
+             #if_all{conditions =
+                         [Username,
+                          #if_node_exists{exists = true}]},
+             VirtualHost,
+             Exchange),
+    Extra = #{keep_while =>
+                  #{rabbit_vhost:khepri_vhost_path(VirtualHost) =>
+                        #if_node_exists{exists = true}}},
     %% TODO: Add a keep_while for the intermediate 'topic_permissions' node so
     %% it is removed when its last children is removed.
     rabbit_khepri:transaction(
       rabbit_vhost:with_user_and_vhost_in_khepri(
         Username, VirtualHost,
         fun () ->
-                Path = khepri_topic_permission_path(
-                         #if_all{conditions =
-                                 [Username,
-                                  #if_node_exists{exists = true}]},
-                         VirtualHost,
-                         Exchange),
-                Extra = #{keep_while =>
-                          #{rabbit_vhost:khepri_vhost_path(VirtualHost) =>
-                            #if_node_exists{exists = true}}},
                 Ret = khepri_tx:put(
                         Path, #kpayload_data{data = TopicPermission}, Extra),
                 case Ret of
@@ -1025,12 +1020,12 @@ clear_topic_permissions_in_khepri(Username, VirtualHost, Exchange) ->
     %% mechanism when we just want to delete something? The code and the
     %% execution would be much simpler if we just deleted the permission and
     %% be done with it.
+    Path = khepri_topic_permission_path(
+             Username, VirtualHost, Exchange),
     rabbit_khepri:transaction(
       rabbit_vhost:with_user_and_vhost_in_khepri(
         Username, VirtualHost,
         fun () ->
-                Path = khepri_topic_permission_path(
-                         Username, VirtualHost, Exchange),
                 case khepri_tx:delete(Path) of
                     {ok, _} -> ok;
                     Error   -> khepri_tx:abort(Error)

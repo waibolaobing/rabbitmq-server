@@ -51,8 +51,7 @@
          info_in_mnesia/1,
          info_in_khepri/1,
          internal_delete_in_mnesia_part1/2,
-         internal_delete_in_mnesia_part2/1,
-         internal_delete_in_khepri/1]).
+         internal_delete_in_mnesia_part2/1]).
 -endif.
 
 %%
@@ -484,7 +483,8 @@ internal_delete_in_khepri(VHost, ActingUser) ->
      || Info <- rabbit_runtime_parameters:list(VHost)],
     Fs2 = [rabbit_policy:delete(VHost, proplists:get_value(name, Info), ActingUser)
            || Info <- rabbit_policy:list(VHost)],
-    _ = rabbit_khepri:transaction(fun() -> internal_delete_in_khepri(VHost) end),
+    Path = khepri_vhost_path(VHost),
+    ok = rabbit_khepri:delete(Path),
     Fs1 ++ Fs2.
 
 internal_delete_in_mnesia_part1(VHost, ActingUser) ->
@@ -499,11 +499,6 @@ internal_delete_in_mnesia_part1(VHost, ActingUser) ->
 
 internal_delete_in_mnesia_part2(VHost) ->
     ok = mnesia:delete({rabbit_vhost, VHost}),
-    ok.
-
-internal_delete_in_khepri(VHost) ->
-    Path = khepri_vhost_path(VHost),
-    {ok, _} = khepri_tx:delete(Path),
     ok.
 
 -spec exists(vhost:name()) -> boolean().

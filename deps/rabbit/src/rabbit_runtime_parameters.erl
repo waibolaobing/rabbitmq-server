@@ -201,7 +201,13 @@ mnesia_update_fun(Key, Term) ->
     end.
 
 khepri_update(Key, Term) ->
-    rabbit_khepri:transaction(khepri_update_fun(Key, Term)).
+    Path = khepri_rp_path(Key),
+    case rabbit_khepri:put(Path, #kpayload_data{data = c(Key, Term)}) of
+        {ok, #{Path := #{data := Params}}} ->
+            {old, Params#runtime_parameters.value};
+        {ok, _} ->
+            new
+    end.
 
 khepri_update(VHost, Comp, Name, Term) ->
     rabbit_khepri:transaction(
@@ -311,11 +317,7 @@ mnesia_clear(VHost, Component, Name) ->
 
 khepri_clear(Key) ->
     Path = khepri_rp_path(Key),
-    F = fun () ->
-                {ok, _} = khepri_tx:delete(Path),
-                ok
-        end,
-    ok = rabbit_khepri:transaction(F).
+    ok = rabbit_khepri:delete(Path).
 
 khepri_clear(VHost, Component, Name) ->
     Path = khepri_rp_path({VHost, Component, Name}),
@@ -393,6 +395,9 @@ list_in_khepri(VHost, Component) ->
               list_in_khepri_tx(VHost, Component)
       end, ro).
 
+%% TODO this could be optimised to process the result outside of the transaction.
+%% It's nested inside a rabbit_policy transaction that makes many other lookups,
+%% so not so straightforward. Let's check this again if we find a performance penalty
 list_in_khepri_tx('_', Component) ->
     list_in_khepri_tx(?STAR, Component);
 list_in_khepri_tx(VHost, '_') ->
@@ -433,16 +438,13 @@ list_global_in_mnesia() ->
 list_global_in_khepri() ->
     %% list only atom keys
     Path = khepri_global_rp_path(?STAR),
-    rabbit_khepri:transaction(
-        fun () ->
-                case khepri_tx:get(Path) of
-                    {ok, Result} ->
-                        [p(P) || #{data := P} <- maps:values(Result),
-                                 is_atom(P#runtime_parameters.key)];
-                    _ ->
-                        []
-                end
-        end, ro).
+    case rabbit_khepri:get(Path) of
+        {ok, Result} ->
+            [p(P) || #{data := P} <- maps:values(Result),
+                     is_atom(P#runtime_parameters.key)];
+        _ ->
+            []
+    end.
 
 -spec list_formatted(rabbit_types:vhost()) -> [rabbit_types:infos()].
 
@@ -555,13 +557,13 @@ lookup_missing_in_mnesia(Key, Default) ->
 
 lookup_missing_in_khepri(Key, Default) ->
     Path = khepri_rp_path(Key),
+    Record = c(Key, Default),
     rabbit_khepri:transaction(
       fun () ->
               case khepri_tx:get(Path) of
                   {ok, #{Path := #{data := R}}} ->
                       R;
                   {ok, _} ->
-                      Record = c(Key, Default),
                       khepri_tx:put(Path, #kpayload_data{data = Record}),
                       Record
               end
