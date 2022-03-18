@@ -147,10 +147,9 @@ migrate_queue_record_in_khepri(QName, GM, Self) ->
                   GMPids1 = [{GM, Self} | GMPids0],
                   Q2 = amqqueue:set_gm_pids(Q1, GMPids1),
                   Q3 = amqqueue:set_state(Q2, live),
-                  ok = rabbit_amqqueue:store_queue_in_khepri(Q3),
-                  %% TODO it's missing the decorators, but at the moment we don't support
+                  %% Todo it's missing the decorators, but at the moment we don't support
                   %% HA in khepri
-                  ok = rabbit_amqqueue:store_queue_ram_in_khepri(Q3)
+                  ok = rabbit_amqqueue:store_queue_in_khepri(Q3)
           end,
     ok = rabbit_khepri:transaction(Fun, rw).
 

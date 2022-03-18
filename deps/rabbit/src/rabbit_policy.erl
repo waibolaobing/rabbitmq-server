@@ -297,16 +297,10 @@ recover0() ->
            end,
            fun() ->
                    ?try_mnesia_tx_or_upgrade_amqqueue_and_retry(
-                      rabbit_khepri:transaction(
-                        fun () ->
-                                rabbit_amqqueue:store_queue_in_khepri(Q3, rabbit_durable_queue)
-                        end),
+                      rabbit_amqqueue:store_queue_in_khepri(Q3, rabbit_durable_queue),
                       begin
                           Q4 = amqqueue:upgrade(Q3),
-                          rabbit_khepri:transaction(
-                            fun () ->
-                                    rabbit_amqqueue:store_queue_in_khepri(Q4, rabbit_durable_queue)
-                            end)
+                          rabbit_amqqueue:store_queue_in_khepri(Q4, rabbit_durable_queue)
                       end)
            end)
      end || Q0 <- Qs],

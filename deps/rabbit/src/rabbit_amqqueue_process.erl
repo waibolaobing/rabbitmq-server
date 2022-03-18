@@ -1855,9 +1855,8 @@ update_state_in_khepri(State, Q0) ->
               %% amqqueue migration:
               %% The amqqueue was read from this transaction, no need
               %% to handle migration.
-              rabbit_amqqueue:store_queue_in_khepri(Q2),
               Q3 = amqqueue:set_decorators(Q2, Decorators),
-              rabbit_amqqueue:store_queue_ram_in_khepri(Q3)
+              rabbit_amqqueue:store_queue_in_khepri(Q3)
       end).
 
 upgrade(Q) ->
@@ -1877,19 +1876,13 @@ upgrade_in_mnesia(Q) ->
       end).
 
 upgrade_in_khepri(Q) ->
+    %% TODO prepare queues outside of the transaction
     Decorators = rabbit_queue_decorator:active(Q),
-    rabbit_khepri:transaction(
-      fun() ->
-              ?try_mnesia_tx_or_upgrade_amqqueue_and_retry(
-                 begin
-                     rabbit_amqqueue:store_queue_in_khepri(Q),
-                     Q1 = amqqueue:set_decorators(Q),
-                     rabbit_amqqueue:store_queue_ram_in_khepri(Q1)
-                 end,
-                 begin
-                     Q2 = amqqueue:upgrade(Q),
-                     rabbit_amqqueue:store_queue_in_khepri(Q2),
-                     Q3 = amqqueue:set_decorators(Q2, Decorators),
-                     rabbit_amqqueue:store_queue_ram_in_khepri(Q3)
-                 end)
-      end).
+    Queue = amqqueue:set_decorators(Q),
+    ?try_mnesia_tx_or_upgrade_amqqueue_and_retry(
+       rabbit_amqqueue:optimised_store_queue_in_khepri(Queue),
+       begin
+           Q2 = amqqueue:upgrade(Q),
+           Q3 = amqqueue:set_decorators(Q2, Decorators),
+           rabbit_amqqueue:optimised_store_queue_in_khepri(Q3)
+       end).
