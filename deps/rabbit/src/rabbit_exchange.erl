@@ -819,7 +819,6 @@ unconditional_delete_in_khepri(X, OnlyDurable) ->
 
 internal_delete_in_mnesia(X = #exchange{name = XName}, OnlyDurable, RemoveBindingsForSource) ->
     ok = mnesia:delete({rabbit_exchange, XName}),
-    ok = mnesia:delete({rabbit_exchange_serial, XName}),
     mnesia:delete({rabbit_durable_exchange, XName}),
     Bindings = case RemoveBindingsForSource of
         true  -> rabbit_binding:remove_for_source_in_mnesia(XName);
@@ -848,14 +847,16 @@ next_serial_in_mnesia(XName) ->
 
 next_serial_in_khepri(XName) ->
     Path = khepri_exchange_serial_path(XName),
+    Extra = #{keep_while => #{khepri_exchange_path(XName) => #if_node_exists{exists = true}}},
     rabbit_khepri:transaction(
       fun() ->
               Serial = case khepri_tx:get(Path) of
-                           {ok, #{Path := #{data := #exchange_serial{next = Serial}}}} -> Serial;
+                           {ok, #{Path := #{data := #exchange_serial{next = Serial0}}}} -> Serial0;
                            _ -> 1
                        end,
               {ok, _} = khepri_tx:put(Path,
-                                      #exchange_serial{name = XName, next = Serial + 1}),
+                                      #exchange_serial{name = XName, next = Serial + 1},
+                                      Extra),
               Serial
       end).
 
@@ -945,8 +946,10 @@ mnesia_write_durable_exchange_to_khepri(
 
 mnesia_write_exchange_serial_to_khepri(
   #exchange{name = Resource} = Exchange) ->
-    Path = khepri_exchange_serial_path(Resource),
-    case rabbit_khepri:insert(Path, Exchange) of
+    Path = khepri_path:combine_with_conditions(khepri_exchange_serial_path(Resource),
+                                               [#if_node_exists{exists = false}]),
+    Extra = #{keep_while => #{khepri_exchange_path(Resource) => #if_node_exists{exists = true}}},
+    case rabbit_khepri:put(Path, Exchange, Extra) of
         ok    -> ok;
         Error -> throw(Error)
     end.
