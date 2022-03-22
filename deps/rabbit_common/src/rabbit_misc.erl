@@ -1179,7 +1179,7 @@ is_os_process_alive(Pid) ->
                                  false ->
                                      Cmd =
                                      format(
-                                       "PowerShell -Command "
+                                       "powershell.exe -NoLogo -NoProfile -NonInteractive -Command "
                                        "\"(Get-Process -Id ~s).ProcessName\"",
                                        [PidS]),
                                      Res =
