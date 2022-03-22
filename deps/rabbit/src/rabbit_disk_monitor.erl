@@ -62,7 +62,16 @@
           %% on start-up
           retries,
           %% Interval between retries
-          interval
+          interval,
+          %% Win32 specific state
+          win32 = undefined
+}).
+
+-record(win32state, {
+          %% port of running powershell.exe
+          port,
+          %% monitor of the port
+          mon_ref
 }).
 
 %%----------------------------------------------------------------------------
@@ -165,7 +174,14 @@ handle_info(try_enable, #state{retries = Retries} = State) ->
 handle_info(update, State) ->
     {noreply, start_timer(internal_update(State))};
 
-handle_info(_Info, State) ->
+% win32 process monitor message
+handle_info({'DOWN', MonRef, port, Port, Info0},
+            #state{win32 = #win32state{port = Port, mon_ref = MonRef}} = State0) ->
+    {ok, State1} = enable_os(State0),
+    {noreply, State1};
+
+handle_info(Info, State) ->
+    rabbit_log:debug("~p unhandled msg: ~p", [?MODULE, Info]),
     {noreply, State}.
 
 terminate(_Reason, _State) ->
@@ -275,6 +291,9 @@ win32_get_disk_free_pwsh(DriveLetter) when
       (DriveLetter >= $a andalso DriveLetter =< $z) orelse
       (DriveLetter >= $A andalso DriveLetter =< $Z) ->
     % DriveLetter $c
+    Cmd = "(Get-PSDrive -Name C).Free",
+    true = erlang:port_command(P, Cmd ++ "\n"),
+    sh_receive(MonRef, P, Cmd),
     PoshCmd = "powershell.exe -NoLogo -NoProfile -NonInteractive -Command (Get-PSDrive " ++ [DriveLetter] ++ ").Free",
     case run_cmd(PoshCmd) of
         {error, timeout} ->
@@ -282,6 +301,39 @@ win32_get_disk_free_pwsh(DriveLetter) when
         PoshResult ->
             % Note: remove \r\n
             {ok, list_to_integer(string:trim(PoshResult))}
+    end.
+
+sh_receive(MonRef, Port, Cmd) ->
+    FoundCmd =  receive
+                    {'DOWN', MonRef, port, Port, Info0} ->
+                        io:format("Saw unexpected DOWN message! ~p~n", [Info0]);
+                        % TODO: restart, re-try
+                    {Port, {data, {eol, Data0}}} ->
+                        io:format("Data0: ~p~n", [Data0]),
+                        case string:find(Data0, Cmd, trailing) of
+                            nomatch ->
+                                {error, {unexpected, Data0}};
+                            _ ->
+                                io:format("found cmd in output: ~p~n", [Cmd]),
+                                ok
+                        end
+                after 5000 ->
+                          {error, timeout}
+                end,
+    case FoundCmd of
+        ok ->
+            receive
+                {'DOWN', MonRef, port, Port, Info1} ->
+                    io:format("Saw unexpected DOWN message! ~p~n", [Info1]);
+                    % TODO: restart, re-try
+                {Port, {data, {eol, Data1}}} ->
+                    io:format("Data: ~p~n", [Data1])
+            after 5000 ->
+                      {error, timeout}
+            end;
+        Error ->
+            io:format("Error: ~p~n", [Error]),
+            Error
     end.
 
 win32_get_disk_free_dir(Dir) ->
@@ -347,18 +399,48 @@ interval(#state{limit        = Limit,
 enable(#state{retries = 0} = State) ->
     State;
 enable(#state{dir = Dir, interval = Interval, limit = Limit, retries = Retries}
-       = State) ->
+       = State0) ->
+    {ok, State1} = enable_os(State0),
     case {catch get_disk_free(Dir),
           vm_memory_monitor:get_total_memory()} of
         {N1, N2} when is_integer(N1), is_integer(N2) ->
             rabbit_log:info("Enabling free disk space monitoring", []),
-            start_timer(set_disk_limits(State, Limit));
+            start_timer(set_disk_limits(State1, Limit));
         Err ->
             rabbit_log:info("Free disk space monitor encountered an error "
                             "(e.g. failed to parse output from OS tools): ~p, retries left: ~b",
                             [Err, Retries]),
             erlang:send_after(Interval, self(), try_enable),
-            State#state{enabled = false}
+            State1#state{enabled = false}
+    end.
+
+enable_os(State) ->
+    enable_os(os:type(), State).
+
+enable_os({win32, _}, State0) ->
+    SystemRootDir = os:getenv("SystemRoot", "/"), 
+    {ok, Pwsh} = find_powershell(SystemRootDir),
+    A1 = ["-NonInteractive", "-NoProfile", "-NoLogo", "-InputFormat", "Text", "-WindowStyle", "Hidden"],
+    % Note: 'hide' must be used or this will not work!
+    A0 = [use_stdio, stderr_to_stdout, {cd, SystemRootDir}, {line, 512}, hide, {args, A1}],
+    Port = erlang:open_port({spawn_executable, Pwsh}, A0),
+    MonRef = erlang:monitor(port, Port),
+    W32State = #win32state{port = Port, mon_ref = MonRef},
+    State0#{win32 = W32State};
+enable_os(_, State) ->
+    {ok, State}.
+
+find_powershell(SystemRootDir) ->
+    case os:find_executable("pwsh.exe") of
+        false ->
+            case os:find_executable("powershell.exe") of
+                false ->
+                    SystemRootDir ++ "\\system32\\WindowsPowerShell\\v1.0\\powershell.exe";
+                Powershell ->
+                    Powershell
+            end;
+        Pwsh ->
+            Pwsh
     end.
 
 run_cmd(Cmd) ->
