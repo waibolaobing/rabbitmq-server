@@ -293,7 +293,8 @@ add_in_khepri(#binding{source = SrcName,
                     %% anything else
                     case check_exclusive_access(Dst, ConnPid) of
                         ok ->
-                            case add_binding_if_missing_in_khepri(B, Path, Src, Dst) of
+                            Type = binding_type(durable(Src), durable(Dst)),
+                            case add_binding(B, Type) of
                                 added ->
                                     Serial = rabbit_exchange:serial_in_khepri(Src),
                                     x_callback(transaction, Src, add_binding, B),
@@ -315,18 +316,6 @@ add_in_khepri(#binding{source = SrcName,
         Errs ->
             not_found_or_absent_errs_in_khepri(not_found(Errs, SrcName, DstName))
     end.
-
-add_binding_if_missing_in_khepri(B, Path, Src, Dst) ->
-    rabbit_khepri:transaction(
-      fun() ->
-              case exists_in_khepri(Path, B) of
-                  true ->
-                      ok;
-                  false ->
-                      ok = add_binding(B, binding_type(durable(Src), durable(Dst))),
-                      added
-              end
-      end).
 
 check_exclusive_access(Q, ConnPid) when ?is_amqqueue(Q) ->
     try rabbit_amqqueue:check_exclusive_access(Q, ConnPid)
@@ -748,11 +737,14 @@ binding_set(Path) ->
 
 add_binding(Binding, BindingType) ->
     Path = khepri_route_path(Binding),
-    Set = binding_set(Path),
-    Data = #{bindings => sets:add_element(Binding, Set), type => BindingType},
-    {ok, _} = khepri_tx:put(Path, #kpayload_data{data = Data}),
-    add_routing(Binding),
-    ok.
+    rabbit_khepri:transaction(
+      fun() ->
+              Set = binding_set(Path),
+              Data = #{bindings => sets:add_element(Binding, Set), type => BindingType},
+              {ok, _} = khepri_tx:put(Path, #kpayload_data{data = Data}),
+              add_routing(Binding),
+              ok
+      end).
 
 add_routing(#binding{destination = Dst} = Binding) ->
     Path = khepri_routing_path(Binding),
