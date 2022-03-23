@@ -201,9 +201,9 @@ do_mark_local_durable_queues_stopped_in_khepri(VHost) ->
           || Q <- Qs0, amqqueue:get_type(Q) =:= rabbit_classic_queue,
              amqqueue:get_state(Q) =/= stopped ],
     rabbit_khepri:transaction(
-        fun() ->
-            [store_queue_as_is_in_khepri(Path, Q) || {Path, Q} <- Qs]
-        end).
+      fun() ->
+              [store_queue_as_is_in_khepri(Path, Q) || {Path, Q} <- Qs]
+      end, rw).
 
 find_local_durable_queues(VHost) ->
     rabbit_khepri:try_mnesia_or_khepri(
@@ -471,7 +471,7 @@ update_in_tx(Name, Fun) ->
       fun() -> rabbit_khepri:transaction(
                  fun() ->
                          update_in_khepri(Name, Fun)
-                 end)
+                 end, rw)
       end).
 
 update_in_mnesia(Name, Fun) ->
@@ -587,7 +587,7 @@ update_decorators_in_khepri(Name) ->
                   _  ->
                       ok
               end
-      end).
+      end, rw).
 
 -spec policy_changed(amqqueue:amqqueue(), amqqueue:amqqueue()) ->
           'ok'.
@@ -2174,7 +2174,7 @@ internal_delete_in_khepri(QueueName, ActingUser, Reason) ->
                        _ ->
                            internal_delete1_in_khepri(QueueName, false, Reason)
                    end
-           end) of
+           end, rw) of
         ok ->
             ok;
         Deletions ->
@@ -2398,7 +2398,7 @@ delete_queues_on_node_down(Node) ->
               lists:unzip(rabbit_khepri:transaction(
                             fun() ->
                                     [{Queue, delete_queue_in_khepri(Queue)} || Queue <- Queues]
-                            end))
+                            end, rw))
       end).   
 
 delete_queue_in_mnesia(QueueName) ->

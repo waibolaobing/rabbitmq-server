@@ -490,7 +490,7 @@ update_scratch(Name, App, Fun) ->
                 fun() ->
                         update_in_khepri(Name, update_scratch_fun(App, Fun, Decorators)),
                         ok
-                end)
+                end, rw)
       end).
 
 update_scratch_fun(App, Fun, Decorators) ->
@@ -754,7 +754,7 @@ delete(XName, IfUnused, Username) ->
                                      [] -> {error, not_found};
                                      [X] -> KhepriFun(X, false)
                                  end
-                         end) of
+                         end, rw) of
                       {error, _} = E ->
                           E;
                       {deleted, X, Bs, Deletions} ->
@@ -858,7 +858,7 @@ next_serial_in_khepri(XName) ->
                                       #exchange_serial{name = XName, next = Serial + 1},
                                       Extra),
               Serial
-      end).
+      end, rw).
 
 -spec peek_serial(name()) -> pos_integer() | 'undefined'.
 

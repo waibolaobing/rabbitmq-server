@@ -180,7 +180,7 @@ recover_semi_durable_route_txn_in_khepri(Path, X) ->
       fun () ->
               case khepri_tx:get(Path) of
                   {ok, #{Path := #{data := #{bindings := Set}}}} ->
-                      {rabbit_exchange:serial_in_mnesia(X), Set};
+                      {rabbit_exchange:serial_in_khepri(X), Set};
                   _ ->
                       no_recover
               end
@@ -224,7 +224,7 @@ exists(#binding{source = SrcName,
                             Errs -> not_found_or_absent_errs_in_khepri(
                                       not_found(Errs, SrcName, DstName))
                         end
-                end)
+                end, ro)
       end).
 
 
@@ -705,7 +705,7 @@ lookup_resources(Src, Dst) ->
     rabbit_khepri:transaction(
       fun() ->
               {lookup_resource(Src), lookup_resource(Dst)}
-      end).
+      end, ro).
 
 lookup_resource(#resource{kind = queue} = Name) ->
     rabbit_amqqueue:lookup_as_list_in_khepri(rabbit_queue, Name);
@@ -744,7 +744,7 @@ add_binding(Binding, BindingType) ->
               {ok, _} = khepri_tx:put(Path, #kpayload_data{data = Data}),
               add_routing(Binding),
               ok
-      end).
+      end, rw).
 
 add_routing(#binding{destination = Dst} = Binding) ->
     Path = khepri_routing_path(Binding),

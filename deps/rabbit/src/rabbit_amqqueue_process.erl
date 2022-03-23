@@ -1848,7 +1848,7 @@ update_state_in_mnesia(State, Q0) ->
 update_state_in_khepri(State, Q0) ->
     QName = amqqueue:get_name(Q0),
     Decorators = rabbit_queue_decorator:active(Q0),
-    rabbit_misc:execute_mnesia_transaction(
+    rabbit_khepri:transaction(
       fun() ->
               [Q] = rabbit_amqqueue:lookup_as_list_in_khepri(rabbit_queue, QName),
               Q2 = amqqueue:set_state(Q, State),
@@ -1857,7 +1857,7 @@ update_state_in_khepri(State, Q0) ->
               %% to handle migration.
               Q3 = amqqueue:set_decorators(Q2, Decorators),
               rabbit_amqqueue:store_queue_in_khepri(Q3)
-      end).
+      end, rw).
 
 upgrade(Q) ->
     rabbit_khepri:try_mnesia_or_khepri(

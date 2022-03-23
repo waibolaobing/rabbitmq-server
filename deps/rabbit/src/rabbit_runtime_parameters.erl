@@ -212,7 +212,7 @@ khepri_update(Key, Term) ->
 khepri_update(VHost, Comp, Name, Term) ->
     rabbit_khepri:transaction(
       rabbit_vhost:with_in_khepri_tx(
-        VHost, khepri_update_fun({VHost, Comp, Name}, Term))).
+        VHost, khepri_update_fun({VHost, Comp, Name}, Term)), rw).
 
 khepri_update_fun(Key, Term) ->
     Path = khepri_rp_path(Key),
@@ -326,7 +326,7 @@ khepri_clear(VHost, Component, Name) ->
                 ok
         end,
     ok = rabbit_khepri:transaction(
-           rabbit_vhost:with_in_khepri_tx(VHost, F)).
+           rabbit_vhost:with_in_khepri_tx(VHost, F), rw).
 
 event_notify(_Event, _VHost, <<"policy">>, _Props) ->
     ok;
@@ -567,7 +567,7 @@ lookup_missing_in_khepri(Key, Default) ->
                       khepri_tx:put(Path, #kpayload_data{data = Record}),
                       Record
               end
-      end).
+      end, rw).
 
 c(Key, Default) ->
     #runtime_parameters{key   = Key,

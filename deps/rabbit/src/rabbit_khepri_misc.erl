@@ -18,8 +18,8 @@
 
 execute_khepri_tx_with_tail(TxFun) ->
     case khepri_tx:is_transaction() of
-        true  -> rabbit_khepri:transaction(TxFun);
-        false -> TailFun = rabbit_khepri:transaction(TxFun),
+        true  -> rabbit_khepri:transaction(TxFun, rw);
+        false -> TailFun = rabbit_khepri:transaction(TxFun, rw),
                  TailFun()
     end.
 
@@ -32,7 +32,7 @@ table_filter_in_khepri(Pred, PreCommitFun, Path) ->
     rabbit_khepri:transaction(
       fun () ->
               khepri_filter(Path, Pred, PreCommitFun)
-      end).
+      end, rw).
 
 khepri_filter(Path, Pred, PreCommitFun) ->
     case khepri_tx:list(Path) of
@@ -62,7 +62,7 @@ execute_khepri_transaction(TxFun, PostCommitFun) ->
     PostCommitFun(rabbit_khepri:transaction(
                     fun () ->
                             TxFun()
-                    end)).
+                    end, rw)).
 
 retry(Fun) ->
     Until = erlang:system_time(millisecond) + (?WAIT_SECONDS * 1000),
