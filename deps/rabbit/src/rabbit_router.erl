@@ -36,7 +36,7 @@ match_bindings(SrcName, Match) ->
       end,
       fun() ->
               Data = rabbit_binding:match_source_in_khepri(SrcName),
-              Bindings = lists:fold(fun(#{bindings := SetOfBindings}, Acc) ->
+              Bindings = lists:foldl(fun(#{bindings := SetOfBindings}, Acc) ->
                                             sets:to_list(SetOfBindings) ++ Acc
                                     end, [], maps:values(Data)),
               [Dest || Binding = #binding{destination = Dest} <- Bindings, Match(Binding)]

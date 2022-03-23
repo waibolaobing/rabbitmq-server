@@ -462,6 +462,11 @@ list_explicit() ->
 -spec list(rabbit_types:vhost()) -> bindings().
 
 list(VHostPath) ->
+    rabbit_khepri:try_mnesia_or_khepri(
+      fun() -> list_in_mnesia(VHostPath) end,
+      fun() -> list_in_khepri(VHostPath) end).
+
+list_in_mnesia(VHostPath) ->
     VHostResource = rabbit_misc:r(VHostPath, '_'),
     Route = #route{binding = #binding{source      = VHostResource,
                                       destination = VHostResource,
@@ -476,23 +481,51 @@ list(VHostPath) ->
                                end, AllBindings),
     implicit_bindings(VHostPath) ++ Filtered.
 
+list_in_khepri(VHostPath) ->
+    %% if there are any default exchange bindings left after an upgrade
+    %% of a pre-3.8 database, filter them out
+    Path = khepri_routes_path() ++ [VHostPath, ?STAR_STAR],
+    {ok, Data} = rabbit_khepri:match_and_get_data(Path),
+    AllBindings = lists:foldl(fun(#{bindings := SetOfBindings}, Acc) ->
+                                      sets:to_list(SetOfBindings) ++ Acc
+                              end, [], maps:values(Data)),
+    Filtered = lists:filter(fun(#binding{source = S}) ->
+                                    S =/= ?DEFAULT_EXCHANGE(VHostPath)
+                            end, AllBindings),
+    implicit_bindings(VHostPath) ++ Filtered.
+
 -spec list_for_source
         (rabbit_types:binding_source()) -> bindings().
 
 list_for_source(?DEFAULT_EXCHANGE(VHostPath)) ->
     implicit_bindings(VHostPath);
-list_for_source(SrcName) ->
-    mnesia:async_dirty(
+list_for_source(#resource{virtual_host = VHost, name = Name} = SrcName) ->
+    rabbit_khepri:try_mnesia_or_khepri(
       fun() ->
-              Route = #route{binding = #binding{source = SrcName, _ = '_'}},
-              [B || #route{binding = B}
-                        <- mnesia:match_object(rabbit_route, Route, read)]
+              mnesia:async_dirty(
+                fun() ->
+                        Route = #route{binding = #binding{source = SrcName, _ = '_'}},
+                        [B || #route{binding = B}
+                                  <- mnesia:match_object(rabbit_route, Route, read)]
+                end)
+      end,
+      fun() ->
+              Path = khepri_routes_path() ++ [VHost, Name, ?STAR_STAR],
+              {ok, Data} = rabbit_khepri:match_and_get_data(Path),
+              lists:foldl(fun(#{bindings := SetOfBindings}, Acc) ->
+                                  sets:to_list(SetOfBindings) ++ Acc
+                          end, [], maps:values(Data))
       end).
 
 -spec list_for_destination
         (rabbit_types:binding_destination()) -> bindings().
 
-list_for_destination(DstName = #resource{virtual_host = VHostPath}) ->
+list_for_destination(DstName) ->
+    rabbit_khepri:try_mnesia_or_khepri(
+      fun() -> list_for_destination_in_mnesia(DstName) end,
+      fun() -> list_for_destination_in_khepri(DstName) end).
+
+list_for_destination_in_mnesia(DstName = #resource{virtual_host = VHostPath}) ->
     AllBindings = mnesia:async_dirty(
           fun() ->
                   Route = #route{binding = #binding{destination = DstName,
@@ -505,6 +538,17 @@ list_for_destination(DstName = #resource{virtual_host = VHostPath}) ->
     Filtered    = lists:filter(fun(#binding{source = S}) ->
                                        S =/= ?DEFAULT_EXCHANGE(VHostPath)
                                end, AllBindings),
+    implicit_for_destination(DstName) ++ Filtered.
+
+list_for_destination_in_khepri(#resource{virtual_host = VHost, kind = Kind, name = Name} = DstName) ->
+    Path = khepri_routes_path() ++ [VHost, ?STAR, Kind, Name, ?STAR_STAR],
+    {ok, Data} = rabbit_khepri:match_and_get_data(Path),
+    AllBindings = lists:foldl(fun(#{bindings := SetOfBindings}, Acc) ->
+                                      sets:to_list(SetOfBindings) ++ Acc
+                              end, [], maps:values(Data)),
+    Filtered = lists:filter(fun(#binding{source = S}) ->
+                                    S =/= ?DEFAULT_EXCHANGE(VHost)
+                            end, AllBindings),
     implicit_for_destination(DstName) ++ Filtered.
 
 implicit_bindings(VHostPath) ->
