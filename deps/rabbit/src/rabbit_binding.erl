@@ -283,7 +283,6 @@ add_in_mnesia(Binding, InnerFun, ActingUser) ->
 add_in_khepri(#binding{source = SrcName,
                        destination = DstName} = Binding, ConnPid, ActingUser) ->
     B = sort_args(Binding),
-    Path = khepri_route_path(Binding),
     case lookup_resources(SrcName, DstName) of
         {[Src], [Dst]} ->
             case rabbit_exchange:validate_binding(Src, B) of
@@ -976,10 +975,7 @@ maybe_auto_delete_in_mnesia(XName, Bindings, Deletions, OnlyDurable) ->
 
 maybe_auto_delete_in_khepri(XName, Bindings, Deletions, OnlyDurable) ->
     {Entry, Deletions1} =
-        case rabbit_exchange:lookup_in_khepri(case OnlyDurable of
-                                                  true  -> rabbit_durable_exchange;
-                                                  false -> rabbit_exchange
-                                              end, XName) of
+        case rabbit_exchange:lookup_in_khepri_tx(XName) of
             {error, not_found}  -> {{undefined, not_deleted, Bindings}, Deletions};
             {ok, X} -> case rabbit_exchange:maybe_auto_delete_in_khepri(X, OnlyDurable) of
                            not_deleted ->

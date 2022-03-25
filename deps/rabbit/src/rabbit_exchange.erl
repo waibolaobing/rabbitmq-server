@@ -26,8 +26,8 @@
          clear_exchange_data_in_khepri/0, clear_durable_exchange_data_in_khepri/0,
          clear_exchange_serial_data_in_khepri/0]).
 -export([list_in_mnesia/2, list_in_khepri_tx/1, update_in_mnesia/2, update_in_khepri/2]).
--export([list_in_mnesia/1, list_in_khepri/1, store_in_khepri/2,
-         lookup_as_list_in_khepri/1, lookup_in_khepri/2]).
+-export([list_in_mnesia/1, list_in_khepri/0, store_in_khepri/1, list_durable_in_khepri/1,
+         lookup_as_list_in_khepri/1, lookup_in_khepri_tx/1]).
 
 %%----------------------------------------------------------------------------
 
@@ -63,21 +63,32 @@ recover(VHost) ->
                       rabbit_durable_exchange)
            end,
            fun() ->
-                   Exchanges = rabbit_khepri_misc:table_filter_in_khepri(
-                                 fun (#exchange{name = XName}) ->
-                                         XName#resource.virtual_host =:= VHost andalso
-                                             lookup_as_list_in_khepri(XName) =:= []
-                                 end,
-                                 fun (X) ->
-                                         store_ram_in_khepri(X)
-                                 end,
-                                 khepri_durable_exchanges_path()),
+                   %% Khepri does not have ram tables, so data will not be lost
+                   %% once a node is restarted. Thus, a single table with
+                   %% idempotent recovery is enough. The exchange record already
+                   %% contains the durable flag and we use it to clean up or recover
+                   %% records.
+                   Path = khepri_exchanges_path() ++ [VHost, ?STAR_STAR],
+                   {ok, Map} = rabbit_khepri:match_and_get_data(Path),
+                   {DurableExchanges, TransientExchanges}
+                       = maps:fold(fun(_, #exchange{durable = true} = X, {DAcc, TAcc}) ->
+                                           {[rabbit_exchange_decorator:set(X) | DAcc], TAcc};
+                                      (_, #exchange{durable = false} = X, {DAcc, TAcc}) ->
+                                           {DAcc, [X | TAcc]}
+                                   end, {[], []}, Map),
+                   rabbit_khepri:transaction(
+                     fun() ->
+                             [_ = store_in_khepri(X) || X <- DurableExchanges],
+                             [_ = khepri_tx:delete(khepri_exchange_path(X#exchange.name))
+                              || X <- TransientExchanges]
+                     end),
+                   %% TODO do something with this callbacks. A single fun calling both?
+                   %% Can we change the APIs?
                    [begin
-                        X1 = rabbit_exchange_decorator:set(X),
-                        callback(X1, create, transaction, [X1]),
-                        callback(X1, create, none, [X1])
-                    end || X <- Exchanges],
-                   Exchanges
+                        callback(X, create, transaction, [X]),
+                        callback(X, create, none, [X])
+                    end || X <- DurableExchanges],
+                   DurableExchanges
            end),
     [XName || #exchange{name = XName} <- Xs].
 
@@ -232,22 +243,10 @@ store_ram_in_mnesia(X) ->
     ok = mnesia:write(rabbit_exchange, X1, write),
     X1.
 
-store_in_khepri(X = #exchange{durable = true}) ->
-    Path = khepri_durable_exchange_path(X#exchange.name),
-    {ok, _} = khepri_tx:put(Path, #kpayload_data{data = X#exchange{decorators = undefined}}),
-    store_ram_in_khepri(X);
-store_in_khepri(X = #exchange{durable = false}) ->
-    store_ram_in_khepri(X).
-
-store_ram_in_khepri(X) ->
+store_in_khepri(X) ->
     Path = khepri_exchange_path(X#exchange.name),
     {ok, _} = khepri_tx:put(Path, #kpayload_data{data = X}),
     X.
-
-store_in_khepri(X = #exchange{durable = true}, TableName) ->
-    Path = mnesia_table_to_khepri_path(TableName, X#exchange.name),
-    {ok, _} = khepri_tx:put(Path, #kpayload_data{data = X}),
-    ok.
 
 %% Used with binaries sent over the wire; the type may not exist.
 
@@ -310,17 +309,17 @@ lookup(Name) ->
 lookup_in_mnesia(Name) ->
     rabbit_misc:dirty_read({rabbit_exchange, Name}).
 
-lookup_in_khepri(Table, Name) ->
-    Path = mnesia_table_to_khepri_path(Table, Name),
-    case khepri_tx:get(Path) of
-        {ok, #{data := X}} -> {ok, X};
-        _ -> {error, not_found}
-    end.
-
 lookup_in_khepri(Name) ->
     Path = khepri_exchange_path(Name),
     case rabbit_khepri:get_data(Path) of
         {ok, X} -> {ok, X};
+        _ -> {error, not_found}
+    end.
+
+lookup_in_khepri_tx(Name) ->
+    Path = khepri_exchange_path(Name),
+    case khepri_tx:get(Path) of
+        {ok, #{Path := #{data := X}}} -> {ok, X};
         _ -> {error, not_found}
     end.
 
@@ -370,13 +369,13 @@ lookup_or_die(Name) ->
 list() ->
     rabbit_khepri:try_mnesia_or_khepri(
       fun() -> list_in_mnesia(rabbit_exchange) end,
-      fun() -> list_in_khepri(rabbit_exchange) end).
+      fun() -> list_in_khepri() end).
 
 list_in_mnesia(Table) ->
     mnesia:dirty_match_object(Table, #exchange{_ = '_'}).
 
-list_in_khepri(Table) ->
-    Path = mnesia_table_to_khepri_path(Table),
+list_in_khepri() ->
+    Path = khepri_exchanges_path(),
     case rabbit_khepri:list_child_data(Path) of
         {ok, Queues} -> maps:values(Queues);
         _            -> []
@@ -427,7 +426,7 @@ list(VHostPath) ->
               list_in_mnesia(rabbit_exchange, VHostPath)
       end,
       fun() ->
-              list_in_khepri(rabbit_exchange, VHostPath)
+              list_in_khepri(VHostPath)
       end).
 
 list_in_mnesia(Table, VHostPath) ->
@@ -439,8 +438,15 @@ list_in_mnesia(Table, VHostPath) ->
                 read)
       end).
 
-list_in_khepri(Table, VHostPath) ->
-    Path = mnesia_table_to_khepri_path(Table) ++ [VHostPath, ?STAR_STAR],
+list_durable_in_khepri(VHostPath) ->
+    list_in_khepri(VHostPath, true).
+
+list_in_khepri(VHostPath) ->
+    list_in_khepri(VHostPath, '_').
+
+list_in_khepri(VHostPath, Durable) ->
+    Pattern = #if_data_matches{pattern = #exchange{durable = Durable, _ = '_'}},
+    Path = khepri_exchanges_path() ++ [VHostPath, ?STAR_STAR, Pattern],
     {ok, Map} = rabbit_khepri:match_and_get_data(Path),
     maps:fold(fun(_, X, Acc) -> [X | Acc] end, [], Map).
 
@@ -533,7 +539,7 @@ update_decorators_in_khepri(#resource{virtual_host = VHost, name = Name} = XName
 update_decorators_in_khepri(Path, VHost, Name) ->
     case rabbit_khepri:get(Path) of
         {ok, #{Path := #{data := X, payload_version := Vsn}}} ->
-            X1 = rabbit_exchange_decorators:set(X),
+            X1 = rabbit_exchange_decorator:set(X),
             Conditions = #if_all{conditions = [Name, #if_payload_version{version = Vsn}]},
             UpdatePath = khepri_exchanges_path() ++ [VHost, Conditions],
             rabbit_khepri:put(UpdatePath, #kpayload_data{data = X1});
@@ -830,7 +836,6 @@ internal_delete_in_mnesia(X = #exchange{name = XName}, OnlyDurable, RemoveBindin
 internal_delete_in_khepri(X = #exchange{name = XName}, OnlyDurable, RemoveBindingsForSource) ->
     {ok, _} = khepri_tx:delete(khepri_exchange_path(XName)),
     {ok, _} = khepri_tx:delete(khepri_exchange_serial_path(XName)),
-    {ok, _} = khepri_tx:delete(khepri_durable_exchange_path(XName)),
     %% TODO bindings...
     Bindings = case RemoveBindingsForSource of
         true  -> rabbit_binding:remove_for_source_in_khepri(XName);
@@ -900,27 +905,11 @@ type_to_module(T) ->
             Module
     end.
 
-mnesia_table_to_khepri_path(rabbit_exchange) ->
-    khepri_exchanges_path();
-mnesia_table_to_khepri_path(rabbit_durable_exchange) ->
-    khepri_durable_exchanges_path().
-
-mnesia_table_to_khepri_path(rabbit_exchange, Name) ->
-    khepri_exchange_path(Name);
-mnesia_table_to_khepri_path(rabbit_durable_exchange, Name) ->
-    khepri_durable_exchange_path(Name).
-
 khepri_exchanges_path() ->
     [?MODULE, exchanges].
 
 khepri_exchange_path(#resource{virtual_host = VHost, name = Name}) ->
     [?MODULE, exchanges, VHost, Name].
-
-khepri_durable_exchanges_path() ->
-    [?MODULE, durable_exchanges].
-
-khepri_durable_exchange_path(#resource{virtual_host = VHost, name = Name}) ->
-    [?MODULE, durable_exchanges, VHost, Name].
 
 khepri_exchange_serials_path() ->
     [?MODULE, exchanges_serials].
@@ -928,19 +917,35 @@ khepri_exchange_serials_path() ->
 khepri_exchange_serial_path(#resource{virtual_host = VHost, name = Name}) ->
     [?MODULE, exchange_serials, VHost, Name].
 
+%% Mnesia contains two tables if an exchange has been recovered:
+%% rabbit_exchange (ram) and rabbit_durable_exchange (disc).
+%% As all data in Khepri is persistent, there is no point on
+%% having ram and data entries. We use the 'persistent' flag on
+%% the record to select the exchanges to be recovered or deleted
+%% on start-up. Any other query can use this flag to select
+%% the exchange type needed.
+%% How do we then transform data from mnesia to khepri when
+%% the feature flag is enabled?
+%% Let's create the Khepri entry if it does not already exist.
+%% If ram table is migrated first, the record will be moved as is.
+%% If the disc table is migrated first, the record is updated with
+%% the exchange decorators.
 mnesia_write_exchange_to_khepri(
   #exchange{name = Resource} = Exchange) ->
     Path = khepri_exchange_path(Resource),
-    case rabbit_khepri:insert(Path, Exchange) of
+    case rabbit_khepri:create(Path, Exchange) of
         ok    -> ok;
+        {error, {mismatching_node, _}} -> ok;
         Error -> throw(Error)
     end.
 
 mnesia_write_durable_exchange_to_khepri(
-  #exchange{name = Resource} = Exchange) ->
-    Path = khepri_durable_exchange_path(Resource),
-    case rabbit_khepri:insert(Path, Exchange) of
+  #exchange{name = Resource} = Exchange0) ->
+    Path = khepri_exchange_path(Resource),
+    Exchange = rabbit_exchange_decorator:set(Exchange0),
+    case rabbit_khepri:create(Path, Exchange) of
         ok    -> ok;
+        {error, {mismatching_node, _}} -> ok;
         Error -> throw(Error)
     end.
 
@@ -954,15 +959,12 @@ mnesia_write_exchange_serial_to_khepri(
         Error -> throw(Error)
     end.
 
+%% There is a single khepri entry for exchanges. Clear it anyway.
 clear_exchange_data_in_khepri() ->
-    Path = khepri_exchanges_path(),
-    case rabbit_khepri:delete(Path) of
-        ok    -> ok;
-        Error -> throw(Error)
-    end.
+    clear_durable_exchange_data_in_khepri().
 
 clear_durable_exchange_data_in_khepri() ->
-    Path = khepri_durable_exchanges_path(),
+    Path = khepri_exchanges_path(),
     case rabbit_khepri:delete(Path) of
         ok    -> ok;
         Error -> throw(Error)

@@ -252,7 +252,7 @@ recover() ->
 recover0() ->
     Xs0 = rabbit_khepri:try_mnesia_or_khepri(
             fun() -> rabbit_exchange:list_in_mnesia(rabbit_durable_exchange) end,
-            fun() -> rabbit_exchange:list_in_khepri(rabbit_durable_exchange) end),
+            fun() -> rabbit_exchange:list_durable_in_khepri() end),
     Policies = list(),
     OpPolicies = list_op(),
     Xs = [rabbit_exchange_decorator:set(
