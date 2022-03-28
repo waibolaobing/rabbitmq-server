@@ -7,6 +7,7 @@
 
 -module(rabbit_exchange_type_topic).
 
+-include_lib("khepri/include/khepri.hrl").
 -include_lib("rabbit_common/include/rabbit.hrl").
 
 -behaviour(rabbit_exchange_type).
@@ -35,12 +36,14 @@ description() ->
 serialise_events() -> false.
 
 %% NB: This may return duplicate results in some situations (that's ok)
-route(#exchange{name = X},
-      #delivery{message = #basic_message{routing_keys = Routes}}) ->
-    lists:append([begin
-                      Words = split_topic_key(RKey),
-                      mnesia:async_dirty(fun trie_match/2, [X, Words])
-                  end || RKey <- Routes]).
+route(X, Delivery) ->
+    rabbit_khepri:try_mnesia_or_khepri(
+      fun() ->
+              route_in_mnesia(X, Delivery)
+      end,
+      fun() ->
+              route_in_khepri(X, Delivery)
+      end).
 
 validate(_X) -> ok.
 validate_binding(_X, _B) -> ok.
@@ -49,8 +52,7 @@ create(_Tx, _X) -> ok.
 delete(transaction, #exchange{name = X}, _Bs) ->
     rabbit_khepri:try_mnesia_or_khepri(
       fun() -> delete_in_mnesia(X) end,
-      %% TODO delete_in_khepri(X)
-      fun() -> ok end);
+      fun() -> delete_in_khepri(X) end);
 delete(none, _Exchange, _Bs) ->
     ok.
 
@@ -67,8 +69,7 @@ remove_bindings(transaction, _X, Bs) ->
               remove_bindings_in_mnesia(Bs)
       end,
       fun() ->
-              %% TODO remove_bindings_in_khepri
-              ok
+              remove_bindings_in_khepri(Bs)
       end);
 remove_bindings(none, _X, _Bs) ->
     ok.
@@ -98,17 +99,111 @@ remove_bindings_in_mnesia(Bs) ->
      end ||  #binding{source = X, key = K, destination = D, args = Args} <- Bs],
     ok.
 
+remove_bindings_in_khepri(Bs) ->
+    %% Let's handle bindings data outside of the transaction
+    Data = [begin
+                Path = khepri_exchange_type_topic_path(X) ++ split_topic_key_in_khepri(K),
+                {Path, #{destination => D, arguments => Args}}
+            end || #binding{source = X, key = K, destination = D, args = Args} <- Bs],
+    rabbit_khepri:transaction(
+      fun() ->
+              [begin
+                   case khepri_tx:get(Path) of
+                       {ok, #{Path := #{data := Set0,
+                                        child_list_length := Children}}} ->
+                           Set = sets:del_element(Binding, Set0),
+                           case {Children, sets:size(Set)} of
+                               {0, 0} ->
+                                   khepri_tx:delete(Path),
+                                   %% TODO can we use a keep_while condition?
+                                   remove_path_if_empty_in_khepri(lists:droplast(Path));
+                               _ ->
+                                   khepri_tx:put(Path, #kpayload_data{data = Set})
+                           end;
+                       _ ->
+                           ok
+                   end
+               end || {Path, Binding} <- Data]
+      end, rw),
+    ok.
+
+%% TODO use keepwhile instead?
+remove_path_if_empty_in_khepri([?MODULE, topic_trie_binding]) ->
+    ok;
+remove_path_if_empty_in_khepri(Path) ->
+    case khepri_tx:get(Path) of
+        {ok, #{Path := #{data := Set,
+                         child_list_length := Children}}} ->
+            case {Children, sets:size(Set)} of
+                {0, 0} ->
+                    khepri_tx:delete(Path),
+                    remove_path_if_empty_in_khepri(lists:droplast(Path));
+                _ ->
+                    ok
+            end;
+        _ ->
+            ok
+    end.
+
 delete_in_mnesia(X) ->
     trie_remove_all_nodes(X),
     trie_remove_all_edges(X),
     trie_remove_all_bindings(X),
     ok.
 
+delete_in_khepri(X) ->
+    rabbit_khepri:delete(khepri_exchange_type_topic_path(X)).
+
 internal_add_binding(#binding{source = X, key = K, destination = D,
                               args = Args}) ->
-    FinalNode = follow_down_create(X, split_topic_key(K)),
-    trie_add_binding(X, FinalNode, D, Args),
-    ok.
+    rabbit_khepri:try_mnesia_or_khepri(
+      fun() ->
+              FinalNode = follow_down_create(X, split_topic_key(K)),
+              trie_add_binding(X, FinalNode, D, Args),
+              ok
+      end,
+      fun() ->
+              Path = khepri_exchange_type_topic_path(X) ++ split_topic_key_in_khepri(K),
+              Binding = #{destination => D, arguments => Args},
+              rabbit_khepri:transaction(
+                fun() ->
+                        Set0 = case khepri_tx:get(Path) of
+                                   {ok, #{Path := #{data := S}}} -> S;
+                                   _ -> sets:new()
+                               end,
+                        Set = sets:add_element(Binding, Set0),
+                        {ok, _} = khepri_tx:put(Path, #kpayload_data{data = Set}),
+                        ok
+                end, rw)
+      end).
+
+khepri_exchange_type_topic_path(#resource{virtual_host = VHost, name = Name}) ->
+    [?MODULE, topic_trie_binding, VHost, Name].
+
+route_in_mnesia(#exchange{name = X},
+                #delivery{message = #basic_message{routing_keys = Routes}}) ->
+    lists:append([begin
+                      Words = split_topic_key(RKey),
+                      mnesia:async_dirty(fun trie_match/2, [X, Words])
+                  end || RKey <- Routes]).
+
+route_in_khepri(#exchange{name = X},
+                #delivery{message = #basic_message{routing_keys = Routes}}) ->
+    lists:append([begin
+                      Words = khepri_topic_match(split_topic_key_in_khepri(RKey)),
+                      Path = khepri_exchange_type_topic_path(X) ++ Words,
+                      {ok, Map} = rabbit_khepri:match_and_get_data(Path),
+                      [maps:get(destination, M) || S <- maps:values(Map), M <- sets:to_list(S)]
+                  end || RKey <- Routes]).
+
+khepri_topic_match(Words) ->
+    lists:map(fun(<<"*">>) ->
+                      ?STAR;
+                 (<<"#">>) ->
+                      ?STAR_STAR;
+                 (W) ->
+                      W
+              end, Words).
 
 trie_match(X, Words) ->
     trie_match(X, root, Words, []).
@@ -270,6 +365,10 @@ new_node_id() ->
 
 split_topic_key(Key) ->
     split_topic_key(Key, [], []).
+
+split_topic_key_in_khepri(Key) ->
+    Words = split_topic_key(Key, [], []),
+    [list_to_binary(W) || W <- Words].
 
 split_topic_key(<<>>, [], []) ->
     [];

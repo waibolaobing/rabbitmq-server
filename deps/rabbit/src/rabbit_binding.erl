@@ -33,7 +33,7 @@
 -define(DEFAULT_EXCHANGE(VHostPath), #resource{virtual_host = VHostPath,
                                               kind = exchange,
                                               name = <<>>}).
-
+-compile(export_all).
 %%----------------------------------------------------------------------------
 
 -export_type([key/0, deletions/0]).
@@ -293,19 +293,15 @@ add_in_khepri(#binding{source = SrcName,
                     case check_exclusive_access(Dst, ConnPid) of
                         ok ->
                             Type = binding_type(durable(Src), durable(Dst)),
-                            case add_binding(B, Type) of
-                                added ->
-                                    Serial = rabbit_exchange:serial_in_khepri(Src),
-                                    x_callback(transaction, Src, add_binding, B),
-                                    x_callback(Serial, Src, add_binding, B),
-                                    %% TODO should it be a trigger? maybe the full fun?
-                                    ok = rabbit_event:notify(
-                                           binding_created,
-                                           info(B) ++ [{user_who_performed_action, ActingUser}]),
-                                    ok;
-                                _ ->
-                                    ok
-                            end;
+                            add_binding(B, Type),                              
+                            Serial = rabbit_exchange:serial_in_khepri(Src),
+                            x_callback(transaction, Src, add_binding, B),
+                            x_callback(Serial, Src, add_binding, B),
+                            %% TODO should it be a trigger? maybe the full fun?
+                            ok = rabbit_event:notify(
+                                   binding_created,
+                                   info(B) ++ [{user_who_performed_action, ActingUser}]),
+                            ok;
                         {error, _} = Err ->
                             Err
                     end;
@@ -381,39 +377,44 @@ remove_in_khepri(#binding{source = SrcName,
                           destination = DstName} = Binding, ConnPid, ActingUser) ->
     Path = khepri_route_path(Binding),
     B = sort_args(Binding),
-    rabbit_khepri_misc:execute_khepri_tx_with_tail(
-      fun () ->
-              case {lookup_resource(SrcName), lookup_resource(DstName)} of
-                  {[_Src], [Dst]} ->
-                      case exists_in_khepri(Path, Binding) of
-                          false ->
-                              rabbit_misc:const(ok);
-                          true ->
-                              case check_exclusive_access(Dst, ConnPid) of
-                                  ok -> remove_in_khepri(B, ActingUser);
-                                  {error, _} = Err -> rabbit_misc:const(Err)
-                              end
-                      end;
-                  Errs ->
-                      absent_errs_only_in_khepri(not_found(Errs, SrcName, DstName))
-              end
-      end).
+    case rabbit_khepri:transaction(
+           fun () ->
+                   case {lookup_resource(SrcName), lookup_resource(DstName)} of
+                       {[_Src], [Dst]} ->
+                           case exists_in_khepri(Path, Binding) of
+                               false ->
+                                   ok;
+                               true ->
+                                   case check_exclusive_access(Dst, ConnPid) of
+                                       ok ->
+                                           ok = delete_binding(B),
+                                           maybe_auto_delete_in_khepri(B#binding.source, [B], new_deletions(), false);
+                                       {error, _} = Err ->
+                                           Err
+                                   end
+                           end;
+                       Errs ->
+                           absent_errs_only_in_khepri(not_found(Errs, SrcName, DstName))
+                   end
+           end) of
+        ok -> ok;
+        {error, _} = Err -> Err;
+        Deletions -> process_deletions_in_khepri(Deletions, ActingUser)
+    end.
 
 remove(Src, Dst, B, ActingUser) ->
     rabbit_khepri:try_mnesia_or_khepri(
       fun() -> remove_in_mnesia(Src, Dst, B, ActingUser) end,
-      fun() -> remove_in_khepri(B, ActingUser) end).
+      fun() ->
+              ok = delete_binding(B),
+              Deletions = maybe_auto_delete_in_khepri(B#binding.source, [B], new_deletions(), false),
+              process_deletions_in_khepri(Deletions, ActingUser)
+      end).
 
 remove_in_mnesia(Src, Dst, B, ActingUser) ->
     ok = sync_route(#route{binding = B}, durable(Src), durable(Dst),
                     fun delete/3),
     Deletions = maybe_auto_delete_in_mnesia(
-                  B#binding.source, [B], new_deletions(), false),
-    process_deletions(Deletions, ActingUser).
-
-remove_in_khepri(B, ActingUser) ->
-    ok = delete_binding(B),
-    Deletions = maybe_auto_delete_in_khepri(
                   B#binding.source, [B], new_deletions(), false),
     process_deletions(Deletions, ActingUser).
 
@@ -763,7 +764,7 @@ delete_binding(Binding) ->
                 true ->
                     khepri_tx:delete(Path);
                 false ->
-                    {ok, _} = khepri_tx:put(Path, #kpayload_data{data = Data#{bindings := Set}})
+                    {ok, _} = khepri_tx:put(Path, #kpayload_data{data = Data#{bindings => Set}})
             end;
         _ ->
             ok
@@ -819,10 +820,10 @@ absent_errs_only_in_mnesia(Names) ->
 absent_errs_only_in_khepri(Names) ->
     Errs = [E || Name <- Names,
                  {absent, _Q, _Reason} = E <- [not_found_or_absent_in_khepri(Name)]],
-    rabbit_misc:const(case Errs of
-                          [] -> ok;
-                          _  -> {error, {resources_missing, Errs}}
-                      end).
+    case Errs of
+        [] -> ok;
+        _  -> {error, {resources_missing, Errs}}
+    end.
 
 table_for_resource(#resource{kind = exchange}) -> rabbit_exchange;
 table_for_resource(#resource{kind = queue})    -> rabbit_queue.
@@ -916,15 +917,17 @@ remove_for_destination_in_khepri(DstName, OnlyDurable) ->
     BindingsMap =
         case OnlyDurable of
             false ->
-                TransientBindingsMap = match_destination_in_khepri(DstName, transient),
+                TransientBindingsMap = match_destination_in_khepri(DstName),
                 remove_in_khepri(TransientBindingsMap),
                 TransientBindingsMap;
             true  ->
-                BindingsMap0 = match_destination_in_khepri(DstName),
-                remove_in_khepri(BindingsMap0),
-                BindingsMap0
+                BindingsMap0 = match_destination_in_khepri(DstName, durable),
+                BindingsMap1 = match_destination_in_khepri(DstName, semi_durable),
+                BindingsMap2 = maps:merge(BindingsMap0, BindingsMap1),
+                remove_in_khepri(BindingsMap2),
+                BindingsMap2
         end,
-    Bindings = maps:fold(fun(_, Set, Acc) ->
+    Bindings = maps:fold(fun(_, #{bindings := Set}, Acc) ->
                                  sets:to_list(Set) ++ Acc
                          end, [], BindingsMap),
     group_bindings_fold(fun maybe_auto_delete_in_khepri/4, new_deletions(),
@@ -1140,8 +1143,8 @@ match_source_and_key_in_khepri(Src, RoutingKeys) ->
       end, [], RoutingKeys).
 
 match_source_in_khepri(#resource{virtual_host = VHost, name = Name}, Type) ->
-    Path = khepri_routes_path() ++ [VHost, Name, ?STAR_STAR]
-        ++ [#if_data_matches{pattern = #{type => Type}}],
+    Path = khepri_routes_path() ++ [VHost, Name]
+        ++ [#if_all{conditions = [?STAR_STAR, #if_data_matches{pattern = #{type => Type}}]}],
     {ok, Map} = rabbit_khepri:tx_match_and_get_data(Path),
     Map.
 
@@ -1151,7 +1154,7 @@ match_destination_in_khepri(#resource{virtual_host = VHost, kind = Kind, name = 
     Map.
 
 match_destination_in_khepri(#resource{virtual_host = VHost, kind = Kind, name = Name}, Type) ->
-    Path = khepri_routes_path() ++ [VHost, ?STAR, Kind, Name, ?STAR_STAR]
-        ++ [#if_data_matches{pattern = #{type => Type}}],
+    Path = khepri_routes_path() ++ [VHost, ?STAR, Kind, Name]
+        ++ [#if_all{conditions = [?STAR_STAR, #if_data_matches{pattern = #{type => Type}}]}],
     {ok, Map} = rabbit_khepri:tx_match_and_get_data(Path),
     Map.

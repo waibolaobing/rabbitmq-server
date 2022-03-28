@@ -375,9 +375,9 @@ list_in_mnesia(Table) ->
     mnesia:dirty_match_object(Table, #exchange{_ = '_'}).
 
 list_in_khepri() ->
-    Path = khepri_exchanges_path(),
-    case rabbit_khepri:list_child_data(Path) of
-        {ok, Queues} -> maps:values(Queues);
+    Path = khepri_exchanges_path() ++ [?STAR_STAR],
+    case rabbit_khepri:match_and_get_data(Path) of
+        {ok, Exchanges} -> maps:values(Exchanges);
         _            -> []
     end.
 
@@ -392,9 +392,9 @@ count_in_mnesia() ->
     mnesia:table_info(rabbit_exchange, size).
 
 count_in_khepri() ->
-    Path = khepri_exchanges_path(),
-    case rabbit_khepri:list_child_data(Path) of
-        {ok, Xs} -> length(Xs);
+    Path = khepri_exchanges_path() ++ [?STAR_STAR],
+    case rabbit_khepri:match(Path) of
+        {ok, Xs} -> maps:size(Xs);
         _            -> 0
     end.
 
@@ -409,9 +409,9 @@ list_names_in_mnesia() ->
     mnesia:dirty_all_keys(rabbit_exchange).
 
 list_names_in_khepri() ->
-    Path = khepri_exchanges_path(),
-    case rabbit_khepri:list_child_nodes(Path) of
-        {ok, Result} -> Result;
+    Path = khepri_exchanges_path() ++ [?STAR_STAR],
+    case rabbit_khepri:match_and_get_data(Path) of
+        {ok, Map} -> maps:keys(Map);
         _            -> []
     end.
 
@@ -446,14 +446,14 @@ list_in_khepri(VHostPath) ->
 
 list_in_khepri(VHostPath, Durable) ->
     Pattern = #if_data_matches{pattern = #exchange{durable = Durable, _ = '_'}},
-    Path = khepri_exchanges_path() ++ [VHostPath, ?STAR_STAR, Pattern],
+    Path = khepri_exchanges_path() ++ [VHostPath, Pattern],
     {ok, Map} = rabbit_khepri:match_and_get_data(Path),
-    maps:fold(fun(_, X, Acc) -> [X | Acc] end, [], Map).
+    maps:values(Map).
 
 list_in_khepri_tx(VHostPath) ->
     Path = khepri_exchanges_path() ++ [VHostPath, ?STAR_STAR],
     {ok, Map} = rabbit_khepri:tx_match_and_get_data(Path),
-    maps:fold(fun(_, X, Acc) -> [X | Acc] end, [], Map).
+    maps:values(Map).
 
 -spec lookup_scratch(name(), atom()) ->
                                rabbit_types:ok(term()) |

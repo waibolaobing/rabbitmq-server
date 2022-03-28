@@ -1332,7 +1332,7 @@ list_in_mnesia(Table) ->
     mnesia:dirty_match_object(Table, amqqueue:pattern_match_all()).
 
 list_in_khepri(Table) ->
-    Path = mnesia_table_to_khepri_path(Table),
+    Path = mnesia_table_to_khepri_path(Table) ++ [?STAR_STAR],
     case rabbit_khepri:list_child_data(Path) of
         {ok, Queues} -> maps:values(Queues);
         _            -> []
@@ -2126,8 +2126,7 @@ internal_delete1_in_khepri(QueueName, OnlyDurable, _Reason) ->
     {ok, _} = khepri_tx:delete(DurablePath),
     %% we want to execute some things, as decided by rabbit_exchange,
     %% after the transaction.
-    rabbit_binding:remove_for_destination_in_khepri(QueueName, OnlyDurable),
-    ok.
+    rabbit_binding:remove_for_destination_in_khepri(QueueName, OnlyDurable).
 
 -spec internal_delete(name(), rabbit_types:username()) -> 'ok'.
 
@@ -2151,7 +2150,7 @@ internal_delete_in_mnesia(QueueName, ActingUser, Reason) ->
                   {[], []} ->
                       rabbit_misc:const(ok);
                   _ ->
-                      Deletions = internal_delete1(QueueName, false, Reason),
+                      Deletions = internal_delete1_in_mnesia(QueueName, false, Reason),
                       T = rabbit_binding:process_deletions(Deletions,
                                                            ?INTERNAL_USER),
                       fun() ->
