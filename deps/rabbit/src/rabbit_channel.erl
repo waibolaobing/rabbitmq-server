@@ -1908,7 +1908,13 @@ binding_action(Fun, SourceNameBin0, DestinationType, DestinationNameBin0,
                       destination = DestinationName,
                       key         = RoutingKey,
                       args        = Arguments},
-             ConnPid,
+             fun (_X, Q) when ?is_amqqueue(Q) ->
+                     try rabbit_amqqueue:check_exclusive_access(Q, ConnPid)
+                     catch exit:Reason -> {error, Reason}
+                     end;
+                 (_X, #exchange{}) ->
+                     ok
+             end,
              Username) of
         {error, {resources_missing, [{not_found, Name} | _]}} ->
             rabbit_amqqueue:not_found(Name);
