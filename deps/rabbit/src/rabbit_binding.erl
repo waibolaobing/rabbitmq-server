@@ -30,6 +30,10 @@
 -export([implicit_for_destination/1, reverse_binding/1]).
 -export([new/4]).
 
+-export([mnesia_write_route_to_khepri/1, mnesia_write_durable_route_to_khepri/1,
+         mnesia_write_semi_durable_route_to_khepri/1, mnesia_write_reverse_route_to_khepri/1,
+         clear_route_in_khepri/0]).
+
 -define(DEFAULT_EXCHANGE(VHostPath), #resource{virtual_host = VHostPath,
                                               kind = exchange,
                                               name = <<>>}).
@@ -49,10 +53,6 @@
                             rabbit_types:error(
                               {'binding_invalid', string(), [any()]}).
 -type bind_res() :: bind_ok_or_error() | rabbit_misc:thunk(bind_ok_or_error()).
--type inner_fun() ::
-        fun((rabbit_types:exchange(),
-             rabbit_types:exchange() | amqqueue:amqqueue()) ->
-                   rabbit_types:ok_or_error(rabbit_types:amqp_error())).
 -type bindings() :: [rabbit_types:binding()].
 
 %% TODO this should really be opaque but that seems to confuse 17.1's
@@ -753,20 +753,20 @@ sync_transient_route(Route, Fun) ->
     ok = Fun(rabbit_route, Route, write),
     ok = Fun(rabbit_reverse_route, reverse_route(Route), write).
 
-binding_set(Path) ->
+bindings_data(Path, BindingType) ->
     case khepri_tx:get(Path) of
-        {ok, #{Path := #{data := #{bindings := Set}}}} ->
-            Set;
+        {ok, #{Path := #{data := Data}}} ->
+            Data;
         _ ->
-            sets:new()
+            #{bindings => sets:new(), type => BindingType}
     end.
 
 add_binding(Binding, BindingType) ->
     Path = khepri_route_path(Binding),
     rabbit_khepri:transaction(
       fun() ->
-              Set = binding_set(Path),
-              Data = #{bindings => sets:add_element(Binding, Set), type => BindingType},
+              Data0 = #{bindings := Set} = bindings_data(Path, BindingType),
+              Data = Data0#{bindings => sets:add_element(Binding, Set)},
               {ok, _} = khepri_tx:put(Path, #kpayload_data{data = Data}),
               add_routing(Binding),
               ok
@@ -1142,6 +1142,9 @@ khepri_routes_path() ->
 %% It only needs to store a list of destinations to be used by rabbit_router.
 %% Unless there is a high queue churn, this should barely change. Thus, the small
 %% penalty for updates should be worth it.
+khepri_routing_path() ->
+    [?MODULE, routing].
+
 khepri_routing_path(#binding{source = Src, key = RoutingKey}) ->
     khepri_routing_path(Src, RoutingKey).
 
@@ -1190,3 +1193,27 @@ match_source_and_destination_in_khepri(#resource{virtual_host = VHost, name = Na
     Path = khepri_routes_path() ++ [VHost, Name, Kind, DstName, ?STAR_STAR],
     {ok, Map} = rabbit_khepri:match_and_get_data(Path),
     Map.
+
+clear_route_in_khepri() ->
+    Path = khepri_routes_path(),
+    RoutingPath = khepri_routing_path(),
+    case rabbit_khepri:delete(Path) of
+        ok ->
+            case rabbit_khepri:delete(RoutingPath) of
+                ok -> ok;
+                Error -> throw(Error)
+            end;
+        Error -> throw(Error)
+    end.
+
+mnesia_write_route_to_khepri(#route{binding = Binding})->
+    add_binding(Binding, transient).
+
+mnesia_write_durable_route_to_khepri(#route{binding = Binding})->
+    add_binding(Binding, durable).
+
+mnesia_write_semi_durable_route_to_khepri(#route{binding = Binding})->
+    add_binding(Binding, semi_durable).
+
+mnesia_write_reverse_route_to_khepri(_)->
+    ok.

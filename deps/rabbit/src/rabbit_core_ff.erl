@@ -244,6 +244,13 @@ user_limits_migration(_FeatureName, _FeatureProps, post_enabled_locally) ->
 
 %% This table order is important. For instance, user permissions depend on
 %% both vhosts and users to exist in the metadata store.
+
+%% TODO should they be integrated on phase1?
+-define(MDS_PHASE2_TABLES, [rabbit_durable_route,
+                            rabbit_semi_durable_route,
+                            rabbit_route,
+                            rabbit_reverse_route]).
+
 -define(MDS_PHASE1_TABLES, [rabbit_vhost,
                             rabbit_user,
                             rabbit_user_permission,
@@ -253,7 +260,7 @@ user_limits_migration(_FeatureName, _FeatureProps, post_enabled_locally) ->
                             rabbit_durable_queue,
                             rabbit_exchange,
                             rabbit_durable_exchange,
-                            rabbit_exchange_serial]).
+                            rabbit_exchange_serial] ++ ?MDS_PHASE2_TABLES).
 
 mds_phase1_migration(_FeatureName, _FeatureProps, is_enabled) ->
     %% We don't check if the migration was done already because we also need
@@ -519,6 +526,22 @@ clear_data_from_previous_attempt(
   FeatureName, [rabbit_durable_queue | Rest]) ->
     ok = rabbit_amqqueue:clear_durable_queue_data_in_khepri(),
     clear_data_from_previous_attempt(FeatureName, Rest);
+clear_data_from_previous_attempt(
+  FeatureName, [rabbit_durable_route | Rest]) ->
+    ok = rabbit_binding:clear_route_in_khepri(),
+    clear_data_from_previous_attempt(FeatureName, Rest);
+clear_data_from_previous_attempt(
+  FeatureName, [rabbit_semi_durable_route | Rest]) ->
+    ok = rabbit_binding:clear_route_in_khepri(),
+    clear_data_from_previous_attempt(FeatureName, Rest);
+clear_data_from_previous_attempt(
+  FeatureName, [rabbit_route | Rest]) ->
+    ok = rabbit_binding:clear_route_in_khepri(),
+    clear_data_from_previous_attempt(FeatureName, Rest);
+clear_data_from_previous_attempt(
+  FeatureName, [rabbit_reverse_route | Rest]) ->
+    ok = rabbit_binding:clear_route_in_khepri(),
+    clear_data_from_previous_attempt(FeatureName, Rest);
 clear_data_from_previous_attempt(_, []) ->
     ok.
 
@@ -592,6 +615,26 @@ copy_from_mnesia_to_khepri(
 copy_from_mnesia_to_khepri(
   FeatureName, [rabbit_exchange_serial = Table | Rest]) ->
     Fun = fun rabbit_exchange:mnesia_write_exchange_serial_to_khepri/1,
+    do_copy_from_mnesia_to_khepri(FeatureName, Table, Fun),
+    copy_from_mnesia_to_khepri(FeatureName, Rest);
+copy_from_mnesia_to_khepri(
+  FeatureName, [rabbit_durable_route = Table | Rest]) ->
+    Fun = fun rabbit_binding:mnesia_write_durable_route_to_khepri/1,
+    do_copy_from_mnesia_to_khepri(FeatureName, Table, Fun),
+    copy_from_mnesia_to_khepri(FeatureName, Rest);
+copy_from_mnesia_to_khepri(
+  FeatureName, [rabbit_semi_durable_route = Table | Rest]) ->
+    Fun = fun rabbit_binding:mnesia_write_semi_durable_route_to_khepri/1,
+    do_copy_from_mnesia_to_khepri(FeatureName, Table, Fun),
+    copy_from_mnesia_to_khepri(FeatureName, Rest);
+copy_from_mnesia_to_khepri(
+  FeatureName, [rabbit_route = Table | Rest]) ->
+    Fun = fun rabbit_binding:mnesia_write_route_to_khepri/1,
+    do_copy_from_mnesia_to_khepri(FeatureName, Table, Fun),
+    copy_from_mnesia_to_khepri(FeatureName, Rest);
+copy_from_mnesia_to_khepri(
+  FeatureName, [rabbit_reverse_route = Table | Rest]) ->
+    Fun = fun rabbit_binding:mnesia_write_reverse_route_to_khepri/1,
     do_copy_from_mnesia_to_khepri(FeatureName, Table, Fun),
     copy_from_mnesia_to_khepri(FeatureName, Rest);
 copy_from_mnesia_to_khepri(_, []) ->
@@ -691,7 +734,7 @@ consume_mnesia_events(FeatureName, Count, Handled) ->
               ok
     end.
 
-%% TODO handle mnesia_runtime_parameters, rabbit_amqqueue, rabbit_exchange
+%% TODO handle mnesia_runtime_parameters, rabbit_amqqueue, rabbit_exchange, rabbit_binding
 handle_mnesia_write(NewRecord) when ?is_vhost(NewRecord) ->
     rabbit_vhost:mnesia_write_to_khepri(NewRecord);
 handle_mnesia_write(NewRecord) when is_record(NewRecord, user_permission) ->
@@ -704,7 +747,7 @@ handle_mnesia_write(NewRecord) ->
     true = ?is_internal_user(NewRecord1),
     rabbit_auth_backend_internal:mnesia_write_to_khepri(NewRecord1).
 
-%% TODO handle mnesia_runtime_parameters, rabbit_amqqueue, rabbit_exchange
+%% TODO handle mnesia_runtime_parameters, rabbit_amqqueue, rabbit_exchange, rabbit_binding
 handle_mnesia_delete(OldRecord) when ?is_vhost(OldRecord) ->
     rabbit_vhost:mnesia_delete_to_khepri(OldRecord);
 handle_mnesia_delete(OldRecord) when ?is_internal_user(OldRecord) ->

@@ -20,13 +20,17 @@ suite() ->
 all() ->
     [
      {group, mnesia_store},
-     {group, khepri_store}
+     {group, khepri_store},
+     {group, khepri_migration}
     ].
 
 groups() ->
     [
      {mnesia_store, [], all_tests()},
-     {khepri_store, [], all_tests()}
+     {khepri_store, [], all_tests()},
+     {khepri_migration, [], [
+                             from_mnesia_to_khepri
+                            ]}
     ].
 
 %% TODO run in mnesia and khepri
@@ -67,7 +71,9 @@ init_per_group(khepri_store = Group, Config0) ->
         Skip ->
             end_per_group(Group, Config),
             Skip
-    end.
+    end;
+init_per_group(khepri_migration = Group, Config) ->
+    init_per_group_common(Group, Config).
 
 init_per_group_common(Group, Config) ->
     Config1 = rabbit_ct_helpers:set_config(Config,
@@ -571,6 +577,38 @@ info_all(Config) ->
                    rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_binding, info_all, [<<"/">>]))),
     
     ok.
+
+from_mnesia_to_khepri(Config) ->
+    Server = rabbit_ct_broker_helpers:get_node_config(Config, 0, nodename),
+    
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
+    Q = ?config(queue_name, Config),
+    ?assertEqual({'queue.declare_ok', Q, 0, 0}, declare(Ch, Q, [])),
+    
+    #'queue.bind_ok'{} = amqp_channel:call(Ch, #'queue.bind'{exchange = <<"amq.direct">>,
+                                                             queue = Q,
+                                                             routing_key = Q}),
+    
+    DefaultExchange = rabbit_misc:r(<<"/">>, exchange, <<>>),
+    QResource = rabbit_misc:r(<<"/">>, queue, Q),
+    DefaultBinding = binding_record(DefaultExchange, QResource, Q, []),
+    DirectBinding = binding_record(rabbit_misc:r(<<"/">>, exchange, <<"amq.direct">>),
+                                   QResource, Q, []),
+    Bindings = lists:sort([DefaultBinding, DirectBinding]),
+    
+    ?assertEqual(Bindings,
+                 lists:sort(
+                   rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_binding, list, [<<"/">>]))),
+
+    case rabbit_ct_broker_helpers:enable_feature_flag(Config, raft_based_metadata_store_phase1) of
+        ok ->
+            timer:sleep(10000),
+            ?assertEqual(Bindings,
+                         lists:sort(
+                           rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_binding, list, [<<"/">>])));
+        Skip ->
+            Skip
+    end.
 
 delete_queues() ->
     [{ok, _} = rabbit_amqqueue:delete(Q, false, false, <<"dummy">>)
