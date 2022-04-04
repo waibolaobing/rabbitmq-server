@@ -38,8 +38,10 @@ groups() ->
 
 all_tests() ->
     [
+     %% Queue bindings
      bind_and_unbind,
      bind_and_delete,
+     bind_and_delete_source_exchange,
      list_bindings,
      list_for_source,
      list_for_destination,
@@ -47,7 +49,11 @@ all_tests() ->
      list_explicit,
      info_all,
      list_with_multiple_vhosts,
-     list_with_multiple_arguments
+     list_with_multiple_arguments,
+     %% Exchange bindings
+     bind_and_unbind_exchange,
+     bind_and_delete_exchange_source,
+     bind_and_delete_exchange_destination
     ].
 
 %% -------------------------------------------------------------------
@@ -89,15 +95,19 @@ end_per_group(_, Config) ->
 init_per_testcase(Testcase, Config) ->
     Config1 = rabbit_ct_helpers:testcase_started(Config, Testcase),
     rabbit_ct_broker_helpers:rpc(Config, 0, ?MODULE, delete_queues, []),
-    Q = rabbit_data_coercion:to_binary(Testcase),
+    Name = rabbit_data_coercion:to_binary(Testcase),
+    rabbit_ct_broker_helpers:rpc(Config, 0, ?MODULE, delete_exchange, [Name]),
     Config2 = rabbit_ct_helpers:set_config(Config1,
-                                           [{queue_name, Q},
-                                            {alt_queue_name, <<Q/binary, "_alt">>}
+                                           [{queue_name, Name},
+                                            {alt_queue_name, <<Name/binary, "_alt">>},
+                                            {exchange_name, Name}
                                            ]),
     rabbit_ct_helpers:run_steps(Config2, rabbit_ct_client_helpers:setup_steps()).
 
 end_per_testcase(Testcase, Config) ->
     rabbit_ct_broker_helpers:rpc(Config, 0, ?MODULE, delete_queues, []),
+    rabbit_ct_broker_helpers:rpc(Config, 0, ?MODULE, delete_exchange,
+                                 [?config(exchange_name, Config)]),
     Config1 = rabbit_ct_helpers:run_steps(
                 Config,
                 rabbit_ct_client_helpers:teardown_steps()),
@@ -176,6 +186,42 @@ bind_and_delete(Config) ->
                  amqp_channel:call(Ch, #'queue.delete'{queue = Q})),
     
     ?assertEqual([],
+                 rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_binding, list, [<<"/">>])),
+    ok.
+
+bind_and_delete_source_exchange(Config) ->
+    Server = rabbit_ct_broker_helpers:get_node_config(Config, 0, nodename),
+    
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
+    Q = ?config(queue_name, Config),
+    X = ?config(exchange_name, Config),
+    ?assertEqual({'queue.declare_ok', Q, 0, 0}, declare(Ch, Q, [])),
+    #'exchange.declare_ok'{} = amqp_channel:call(Ch, #'exchange.declare'{exchange = X}),
+
+    DefaultExchange = rabbit_misc:r(<<"/">>, exchange, <<>>),
+    QResource = rabbit_misc:r(<<"/">>, queue, Q),
+    DefaultBinding = binding_record(DefaultExchange, QResource, Q, []),
+    
+    %% Binding to the default exchange, it's always present
+    ?assertEqual([DefaultBinding],
+                 rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_binding, list, [<<"/">>])),
+    
+    %% Let's bind to other exchange
+    #'queue.bind_ok'{} = amqp_channel:call(Ch, #'queue.bind'{exchange = X,
+                                                             queue = Q,
+                                                             routing_key = Q}),
+    
+    XBinding = binding_record(rabbit_misc:r(<<"/">>, exchange, X), QResource, Q, []),
+    Bindings = lists:sort([DefaultBinding, XBinding]),
+    
+    ?assertEqual(Bindings,
+                 lists:sort(
+                   rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_binding, list, [<<"/">>]))),
+    
+    ?assertMatch(#'exchange.delete_ok'{},
+                 amqp_channel:call(Ch, #'exchange.delete'{exchange = X})),
+    
+    ?assertEqual([DefaultBinding],
                  rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_binding, list, [<<"/">>])),
     ok.
 
@@ -610,9 +656,105 @@ from_mnesia_to_khepri(Config) ->
             Skip
     end.
 
+bind_and_unbind_exchange(Config) ->
+    Server = rabbit_ct_broker_helpers:get_node_config(Config, 0, nodename),
+    
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
+    X = ?config(exchange_name, Config),
+    
+    ?assertEqual([],
+                 rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_binding, list, [<<"/">>])),
+    
+    #'exchange.declare_ok'{} = amqp_channel:call(Ch, #'exchange.declare'{exchange = X}),
+    %% Let's bind to other exchange
+    #'exchange.bind_ok'{} = amqp_channel:call(Ch, #'exchange.bind'{destination = X,
+                                                                   source = <<"amq.direct">>,
+                                                                   routing_key = <<"key">>}),
+    
+    DirectBinding = binding_record(rabbit_misc:r(<<"/">>, exchange, <<"amq.direct">>),
+                                   rabbit_misc:r(<<"/">>, exchange, X),
+                                   <<"key">>, []),
+    
+    ?assertEqual([DirectBinding],
+                 lists:sort(
+                   rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_binding, list, [<<"/">>]))),
+    
+    #'exchange.unbind_ok'{} = amqp_channel:call(Ch,
+                                                #'exchange.unbind'{destination = X,
+                                                                   source = <<"amq.direct">>,
+                                                                   routing_key = <<"key">>}),
+    
+    ?assertEqual([],
+                 rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_binding, list, [<<"/">>])),
+    ok.
+
+bind_and_delete_exchange_destination(Config) ->
+    Server = rabbit_ct_broker_helpers:get_node_config(Config, 0, nodename),
+    
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
+    X = ?config(exchange_name, Config),
+    
+    ?assertEqual([],
+                 rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_binding, list, [<<"/">>])),
+    
+    #'exchange.declare_ok'{} = amqp_channel:call(Ch, #'exchange.declare'{exchange = X}),
+    %% Let's bind to other exchange
+    #'exchange.bind_ok'{} = amqp_channel:call(Ch, #'exchange.bind'{destination = X,
+                                                                   source = <<"amq.direct">>,
+                                                                   routing_key = <<"key">>}),
+    
+    DirectBinding = binding_record(rabbit_misc:r(<<"/">>, exchange, <<"amq.direct">>),
+                                   rabbit_misc:r(<<"/">>, exchange, X),
+                                   <<"key">>, []),
+    
+    ?assertEqual([DirectBinding],
+                 lists:sort(
+                   rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_binding, list, [<<"/">>]))),
+    
+    #'exchange.delete_ok'{} = amqp_channel:call(Ch, #'exchange.delete'{exchange = X}),
+    
+    ?assertEqual([],
+                 rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_binding, list, [<<"/">>])),
+    ok.
+
+bind_and_delete_exchange_source(Config) ->
+    Server = rabbit_ct_broker_helpers:get_node_config(Config, 0, nodename),
+    
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
+    X = ?config(exchange_name, Config),
+    
+    ?assertEqual([],
+                 rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_binding, list, [<<"/">>])),
+    
+    #'exchange.declare_ok'{} = amqp_channel:call(Ch, #'exchange.declare'{exchange = X}),
+    %% Let's bind to other exchange
+    #'exchange.bind_ok'{} = amqp_channel:call(Ch, #'exchange.bind'{destination = <<"amq.direct">>,
+                                                                   source = X,
+                                                                   routing_key = <<"key">>}),
+    
+    DirectBinding = binding_record(rabbit_misc:r(<<"/">>, exchange, X),
+                                   rabbit_misc:r(<<"/">>, exchange, <<"amq.direct">>),
+                                   <<"key">>, []),
+    
+    ?assertEqual([DirectBinding],
+                 lists:sort(
+                   rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_binding, list, [<<"/">>]))),
+    
+    #'exchange.delete_ok'{} = amqp_channel:call(Ch, #'exchange.delete'{exchange = X}),
+    
+    ?assertEqual([],
+                 rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_binding, list, [<<"/">>])),
+    ok.
+
+
+%% Internal
+
 delete_queues() ->
     [{ok, _} = rabbit_amqqueue:delete(Q, false, false, <<"dummy">>)
      || Q <- rabbit_amqqueue:list()].
+
+delete_exchange(Name) ->
+    _ = rabbit_exchange:delete(rabbit_misc:r(<<"/">>, exchange, Name), false, <<"dummy">>).
 
 declare(Ch, Q, Args) ->
     amqp_channel:call(Ch, #'queue.declare'{queue     = Q,

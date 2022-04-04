@@ -679,7 +679,7 @@ remove_for_source_in_mnesia(SrcName) ->
 remove_for_source_in_khepri(SrcName) ->
     Bindings = match_source_in_khepri(SrcName),
     remove_in_khepri(Bindings),
-    maps:fold(fun(_, Set, Acc) ->
+    maps:fold(fun(_, #{bindings := Set}, Acc) ->
                       sets:to_list(Set) ++ Acc
               end, [], Bindings).
 
