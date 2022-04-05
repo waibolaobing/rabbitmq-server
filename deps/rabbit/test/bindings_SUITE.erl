@@ -21,7 +21,9 @@ all() ->
     [
      {group, mnesia_store},
      {group, khepri_store},
-     {group, khepri_migration}
+     {group, khepri_migration},
+     {group, mnesia_cluster},
+     {group, khepri_cluster}
     ].
 
 groups() ->
@@ -30,11 +32,14 @@ groups() ->
      {khepri_store, [], all_tests()},
      {khepri_migration, [], [
                              from_mnesia_to_khepri
-                            ]}
+                            ]},
+     {mnesia_cluster, [], [
+                           transient_queue_on_node_down
+                          ]},
+     {khepri_cluster, [], [
+                           transient_queue_on_node_down
+                          ]}
     ].
-
-%% TODO run in mnesia and khepri
-%% TODO run migration policies
 
 all_tests() ->
     [
@@ -68,22 +73,30 @@ end_per_suite(Config) ->
     rabbit_ct_helpers:run_teardown_steps(Config).
 
 init_per_group(mnesia_store = Group, Config) ->
-    init_per_group_common(Group, Config);
+    init_per_group_common(Group, Config, 1);
 init_per_group(khepri_store = Group, Config0) ->
-    Config = init_per_group_common(Group, Config0),
+    Config = init_per_group_common(Group, Config0, 1),
+    enable_khepri(Group, Config);
+init_per_group(khepri_migration = Group, Config) ->
+    init_per_group_common(Group, Config, 1);
+init_per_group(mnesia_cluster = Group, Config) ->
+    init_per_group_common(Group, Config, 3);
+init_per_group(khepri_cluster = Group, Config0) ->
+    Config = init_per_group_common(Group, Config0, 3),
+    enable_khepri(Group, Config).
+
+enable_khepri(Group, Config) ->
     case rabbit_ct_broker_helpers:enable_feature_flag(Config, raft_based_metadata_store_phase1) of
         ok ->
             Config;
         Skip ->
             end_per_group(Group, Config),
             Skip
-    end;
-init_per_group(khepri_migration = Group, Config) ->
-    init_per_group_common(Group, Config).
+    end.
 
-init_per_group_common(Group, Config) ->
+init_per_group_common(Group, Config, Size) ->
     Config1 = rabbit_ct_helpers:set_config(Config,
-                                           [{rmq_nodes_count, 1},
+                                           [{rmq_nodes_count, Size},
                                             {rmq_nodename_suffix, Group},
                                             {tcp_ports_base}]),
     rabbit_ct_helpers:run_steps(Config1, rabbit_ct_broker_helpers:setup_steps()).
@@ -112,8 +125,6 @@ end_per_testcase(Testcase, Config) ->
                 Config,
                 rabbit_ct_client_helpers:teardown_steps()),
     rabbit_ct_helpers:testcase_finished(Config1, Testcase).
-
-%% TODO run for both mnesia and khepri!
 
 %% -------------------------------------------------------------------
 %% Testcases.
@@ -746,6 +757,56 @@ bind_and_delete_exchange_source(Config) ->
                  rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_binding, list, [<<"/">>])),
     ok.
 
+transient_queue_on_node_down(Config) ->
+    Server = rabbit_ct_broker_helpers:get_node_config(Config, 0, nodename),
+    
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
+    Q = ?config(queue_name, Config),
+    QAlt = ?config(alt_queue_name, Config),
+    ?assertEqual({'queue.declare_ok', Q, 0, 0}, declare(Ch, Q, [])),
+    ?assertEqual({'queue.declare_ok', QAlt, 0, 0}, declare(Ch, QAlt, [], false)),
+
+    DefaultExchange = rabbit_misc:r(<<"/">>, exchange, <<>>),
+    QResource = rabbit_misc:r(<<"/">>, queue, Q),
+    QAltResource = rabbit_misc:r(<<"/">>, queue, QAlt),
+    DefaultBinding = binding_record(DefaultExchange, QResource, Q, []),
+    DefaultAltBinding = binding_record(DefaultExchange, QAltResource, QAlt, []),
+    
+    %% Binding to the default exchange, it's always present
+    ?assertEqual(lists:sort([DefaultBinding, DefaultAltBinding]),
+                 lists:sort(rabbit_ct_broker_helpers:rpc(Config, 1, rabbit_binding, list, [<<"/">>]))),
+    
+    %% Let's bind to other exchange
+    #'queue.bind_ok'{} = amqp_channel:call(Ch, #'queue.bind'{exchange = <<"amq.direct">>,
+                                                             queue = Q,
+                                                             routing_key = Q}),
+    #'queue.bind_ok'{} = amqp_channel:call(Ch, #'queue.bind'{exchange = <<"amq.direct">>,
+                                                             queue = QAlt,
+                                                             routing_key = QAlt}),
+    
+    DirectBinding = binding_record(rabbit_misc:r(<<"/">>, exchange, <<"amq.direct">>),
+                                   QResource, Q, []),
+    DirectAltBinding = binding_record(rabbit_misc:r(<<"/">>, exchange, <<"amq.direct">>),
+                                      QAltResource, QAlt, []),
+    Bindings = lists:sort([DefaultBinding, DirectBinding, DefaultAltBinding, DirectAltBinding]),
+    
+    ?assertEqual(Bindings,
+                 lists:sort(
+                   rabbit_ct_broker_helpers:rpc(Config, 1, rabbit_binding, list, [<<"/">>]))),
+    
+    rabbit_ct_broker_helpers:stop_node(Config, Server),
+
+    ?assertEqual([],
+                 rabbit_ct_broker_helpers:rpc(Config, 1, rabbit_binding, list, [<<"/">>])),
+    ?assertEqual([],
+                 rabbit_ct_broker_helpers:rpc(Config, 1, rabbit_amqqueue, list, [<<"/">>])),
+
+    rabbit_ct_broker_helpers:start_node(Config, Server),
+
+    ?assertEqual(lists:sort([DefaultBinding, DirectBinding]),
+                 lists:sort(
+                   rabbit_ct_broker_helpers:rpc(Config, 1, rabbit_binding, list, [<<"/">>]))),
+    ok.
 
 %% Internal
 
@@ -757,8 +818,11 @@ delete_exchange(Name) ->
     _ = rabbit_exchange:delete(rabbit_misc:r(<<"/">>, exchange, Name), false, <<"dummy">>).
 
 declare(Ch, Q, Args) ->
+    declare(Ch, Q, Args, true).
+
+declare(Ch, Q, Args, Durable) ->
     amqp_channel:call(Ch, #'queue.declare'{queue     = Q,
-                                           durable   = true,
+                                           durable   = Durable,
                                            auto_delete = false,
                                            arguments = Args}).
 
