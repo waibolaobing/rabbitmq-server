@@ -677,7 +677,7 @@ remove_for_source_in_mnesia(SrcName) ->
             mnesia:dirty_match_object(rabbit_semi_durable_route, Match))).
 
 remove_for_source_in_khepri(SrcName) ->
-    Bindings = match_source_in_khepri(SrcName),
+    Bindings = match_source_in_khepri_tx(SrcName),
     remove_in_khepri(Bindings),
     maps:fold(fun(_, #{bindings := Set}, Acc) ->
                       sets:to_list(Set) ++ Acc
@@ -1157,18 +1157,37 @@ destination_from_khepri_path([?MODULE, _Type, VHost, _Src, Kind, Dst | _]) ->
 source_from_khepri_path([?MODULE, _Type, VHost, Src | _]) ->
     #resource{virtual_host = VHost, kind = exchange, name = Src}.
 
-match_source_in_khepri(#resource{virtual_host = VHost, name = Name}) ->
+match_source_in_khepri_tx(#resource{virtual_host = VHost, name = Name}) ->
     Path = khepri_routes_path() ++ [VHost, Name, ?STAR_STAR],
     {ok, Map} = rabbit_khepri:tx_match_and_get_data(Path),
     Map.
 
+match_source_in_khepri(#resource{virtual_host = VHost, name = Name}) ->
+    Path = khepri_routes_path() ++ [VHost, Name, ?STAR_STAR],
+    {ok, Map} = rabbit_khepri:match_and_get_data(Path),
+    Map.
+
+match_source_and_key_in_khepri(Src, ['_']) ->
+    Path = khepri_routing_path(Src, ?STAR_STAR),
+    case rabbit_khepri:match_and_get_data(Path) of
+        {ok, Map} ->
+            maps:fold(fun(_, Dsts, Acc) ->
+                              sets:to_list(Dsts) ++ Acc
+                      end, [], Map);
+        {error, {node_not_found, _}} ->
+            []
+    end;
 match_source_and_key_in_khepri(Src, RoutingKeys) ->
     lists:foldl(
       fun(RK, Acc) ->
               Path = khepri_routing_path(Src, RK),
               %% Don't use transaction if we want to hit the cache
-              {ok, Dsts} = rabbit_khepri:get_data(Path),
-              sets:to_list(Dsts) ++ Acc
+              case rabbit_khepri:get_data(Path) of
+                  {ok, Dsts} ->
+                      sets:to_list(Dsts) ++ Acc;
+                  {error, {node_not_found, _}} ->
+                      Acc
+              end
       end, [], RoutingKeys).
 
 match_source_in_khepri(#resource{virtual_host = VHost, name = Name}, Type) ->

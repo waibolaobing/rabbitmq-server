@@ -249,7 +249,10 @@ user_limits_migration(_FeatureName, _FeatureProps, post_enabled_locally) ->
 -define(MDS_PHASE2_TABLES, [rabbit_durable_route,
                             rabbit_semi_durable_route,
                             rabbit_route,
-                            rabbit_reverse_route]).
+                            rabbit_reverse_route,
+                            rabbit_topic_trie_node,
+                            rabbit_topic_trie_edge,
+                            rabbit_topic_trie_binding]).
 
 -define(MDS_PHASE1_TABLES, [rabbit_vhost,
                             rabbit_user,
@@ -542,6 +545,16 @@ clear_data_from_previous_attempt(
   FeatureName, [rabbit_reverse_route | Rest]) ->
     ok = rabbit_binding:clear_route_in_khepri(),
     clear_data_from_previous_attempt(FeatureName, Rest);
+clear_data_from_previous_attempt(
+  FeatureName, [rabbit_topic_trie_node | Rest]) ->
+    clear_data_from_previous_attempt(FeatureName, Rest);
+clear_data_from_previous_attempt(
+  FeatureName, [rabbit_topic_trie_edge | Rest]) ->
+    clear_data_from_previous_attempt(FeatureName, Rest);
+clear_data_from_previous_attempt(
+  FeatureName, [rabbit_topic_trie_binding | Rest]) ->
+    ok = rabbit_exchange_type_topic:clear_data_in_khepri(),
+    clear_data_from_previous_attempt(FeatureName, Rest);
 clear_data_from_previous_attempt(_, []) ->
     ok.
 
@@ -635,6 +648,21 @@ copy_from_mnesia_to_khepri(
 copy_from_mnesia_to_khepri(
   FeatureName, [rabbit_reverse_route = Table | Rest]) ->
     Fun = fun rabbit_binding:mnesia_write_reverse_route_to_khepri/1,
+    do_copy_from_mnesia_to_khepri(FeatureName, Table, Fun),
+    copy_from_mnesia_to_khepri(FeatureName, Rest);
+copy_from_mnesia_to_khepri(
+  FeatureName, [rabbit_topic_trie_node | Rest]) ->
+    %% Nothing to do, the `rabbit_topic_trie_binding` is enough to perform the migration
+    %% as Khepri stores each topic binding as a single path
+    copy_from_mnesia_to_khepri(FeatureName, Rest);
+copy_from_mnesia_to_khepri(
+  FeatureName, [rabbit_topic_trie_edge | Rest]) ->
+    %% Nothing to do, the `rabbit_topic_trie_binding` is enough to perform the migration
+    %% as Khepri stores each topic binding as a single path
+    copy_from_mnesia_to_khepri(FeatureName, Rest);
+copy_from_mnesia_to_khepri(
+  FeatureName, [rabbit_topic_trie_binding = Table | Rest]) ->
+    Fun = fun rabbit_exchange_type_topic:mnesia_write_to_khepri/1,
     do_copy_from_mnesia_to_khepri(FeatureName, Table, Fun),
     copy_from_mnesia_to_khepri(FeatureName, Rest);
 copy_from_mnesia_to_khepri(_, []) ->
@@ -734,7 +762,8 @@ consume_mnesia_events(FeatureName, Count, Handled) ->
               ok
     end.
 
-%% TODO handle mnesia_runtime_parameters, rabbit_amqqueue, rabbit_exchange, rabbit_binding
+%% TODO handle mnesia_runtime_parameters, rabbit_amqqueue, rabbit_exchange, rabbit_binding,
+%% rabbit_exchange_type_topic
 handle_mnesia_write(NewRecord) when ?is_vhost(NewRecord) ->
     rabbit_vhost:mnesia_write_to_khepri(NewRecord);
 handle_mnesia_write(NewRecord) when is_record(NewRecord, user_permission) ->
@@ -747,7 +776,8 @@ handle_mnesia_write(NewRecord) ->
     true = ?is_internal_user(NewRecord1),
     rabbit_auth_backend_internal:mnesia_write_to_khepri(NewRecord1).
 
-%% TODO handle mnesia_runtime_parameters, rabbit_amqqueue, rabbit_exchange, rabbit_binding
+%% TODO handle mnesia_runtime_parameters, rabbit_amqqueue, rabbit_exchange, rabbit_binding,
+%% rabbit_exchange_type_topic
 handle_mnesia_delete(OldRecord) when ?is_vhost(OldRecord) ->
     rabbit_vhost:mnesia_delete_to_khepri(OldRecord);
 handle_mnesia_delete(OldRecord) when ?is_internal_user(OldRecord) ->

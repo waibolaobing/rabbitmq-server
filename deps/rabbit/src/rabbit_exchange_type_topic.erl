@@ -18,6 +18,8 @@
          remove_bindings/3, assert_args_equivalence/2]).
 -export([info/1, info/2]).
 
+-export([clear_data_in_khepri/0, mnesia_write_to_khepri/1]).
+
 -rabbit_boot_step({?MODULE,
                    [{description, "exchange type topic"},
                     {mfa,         {rabbit_registry, register,
@@ -154,28 +156,28 @@ delete_in_mnesia(X) ->
 delete_in_khepri(X) ->
     rabbit_khepri:delete(khepri_exchange_type_topic_path(X)).
 
-internal_add_binding(#binding{source = X, key = K, destination = D,
-                              args = Args}) ->
+internal_add_binding(#binding{source = X, key = K, destination = D, args = Args}) ->
     rabbit_khepri:try_mnesia_or_khepri(
       fun() ->
               FinalNode = follow_down_create(X, split_topic_key(K)),
               trie_add_binding(X, FinalNode, D, Args),
               ok
       end,
+      fun () -> internal_add_binding_in_khepri(X, K, D, Args) end).
+
+internal_add_binding_in_khepri(X, K, D, Args) ->
+    Path = khepri_exchange_type_topic_path(X) ++ split_topic_key_in_khepri(K),
+    Binding = #{destination => D, arguments => Args},
+    rabbit_khepri:transaction(
       fun() ->
-              Path = khepri_exchange_type_topic_path(X) ++ split_topic_key_in_khepri(K),
-              Binding = #{destination => D, arguments => Args},
-              rabbit_khepri:transaction(
-                fun() ->
-                        Set0 = case khepri_tx:get(Path) of
-                                   {ok, #{Path := #{data := S}}} -> S;
-                                   _ -> sets:new()
-                               end,
-                        Set = sets:add_element(Binding, Set0),
-                        {ok, _} = khepri_tx:put(Path, #kpayload_data{data = Set}),
-                        ok
-                end, rw)
-      end).
+              Set0 = case khepri_tx:get(Path) of
+                         {ok, #{Path := #{data := S}}} -> S;
+                         _ -> sets:new()
+                     end,
+              Set = sets:add_element(Binding, Set0),
+              {ok, _} = khepri_tx:put(Path, #kpayload_data{data = Set}),
+              ok
+      end, rw).
 
 khepri_exchange_type_topic_path(#resource{virtual_host = VHost, name = Name}) ->
     [?MODULE, topic_trie_binding, VHost, Name].
@@ -191,19 +193,31 @@ route_in_khepri(#exchange{name = X},
                 #delivery{message = #basic_message{routing_keys = Routes}}) ->
     lists:append([begin
                       Words = khepri_topic_match(split_topic_key_in_khepri(RKey)),
-                      Path = khepri_exchange_type_topic_path(X) ++ Words,
-                      {ok, Map} = rabbit_khepri:match_and_get_data(Path),
-                      [maps:get(destination, M) || S <- maps:values(Map), M <- sets:to_list(S)]
+                      Root = khepri_exchange_type_topic_path(X),
+                      Path = Root ++ Words,
+                      Fanout = Root ++ [<<"#">>],
+                      Map = rabbit_khepri:transaction(
+                              fun() ->
+                                      case khepri_tx:get(Fanout, #{expect_specific_node => true}) of
+                                          {ok, #{Fanout := #{data := _}} = Map} ->
+                                              Map;
+                                          _ ->
+                                              case khepri_tx:get(Path) of
+                                                  {ok, Map} -> Map;
+                                                  _ -> #{}
+                                              end
+                                      end
+                              end, ro),
+                      maps:fold(fun(_, #{data := Data}, Acc) ->
+                                        Bindings = sets:to_list(Data),
+                                        [maps:get(destination, B) || B <- Bindings] ++ Acc;
+                                   (_, _, Acc) ->
+                                        Acc
+                                end, [], Map)
                   end || RKey <- Routes]).
 
 khepri_topic_match(Words) ->
-    lists:map(fun(<<"*">>) ->
-                      ?STAR;
-                 (<<"#">>) ->
-                      ?STAR_STAR;
-                 (W) ->
-                      W
-              end, Words).
+    lists:map(fun(W) -> #if_any{conditions = [W, <<"*">>]} end, Words).
 
 trie_match(X, Words) ->
     trie_match(X, root, Words, []).
@@ -378,3 +392,25 @@ split_topic_key(<<$., Rest/binary>>, RevWordAcc, RevResAcc) ->
     split_topic_key(Rest, [], [lists:reverse(RevWordAcc) | RevResAcc]);
 split_topic_key(<<C:8, Rest/binary>>, RevWordAcc, RevResAcc) ->
     split_topic_key(Rest, [C | RevWordAcc], RevResAcc).
+
+clear_data_in_khepri() ->
+    Path = [?MODULE, topic_trie_binding],
+    case rabbit_khepri:delete(Path) of
+        ok    -> ok;
+        Error -> throw(Error)
+    end.
+
+mnesia_write_to_khepri(#topic_trie_binding{trie_binding = #trie_binding{exchange_name = X,
+                                                                        destination   = D}}) ->
+    %% There isn't enough information to rebuild the tree as the routing key is split
+    %% along the trie tree on mnesia. But, we can query the bindings table (migrated
+    %% previosly) and migrate the entries that match this <X, D> combo
+    %% We'll probably update multiple times the bindings that differ only on the arguments,
+    %% but that is fine. Migration happens only once, so it is better to do a bit more of work
+    %% than skipping bindings because out of order arguments.
+    Map = rabbit_binding:match_source_and_destination_in_khepri(X, D),
+    Bindings = lists:foldl(fun(#{bindings := SetOfBindings}, Acc) ->
+                                   sets:to_list(SetOfBindings) ++ Acc
+                           end, [], maps:values(Map)),
+    [internal_add_binding_in_khepri(X, K, D, Args) || #binding{key = K,
+                                                               args = Args} <- Bindings].
