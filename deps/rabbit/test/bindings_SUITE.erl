@@ -659,10 +659,12 @@ from_mnesia_to_khepri(Config) ->
 
     case rabbit_ct_broker_helpers:enable_feature_flag(Config, raft_based_metadata_store_phase1) of
         ok ->
-            timer:sleep(10000),
-            ?assertEqual(Bindings,
-                         lists:sort(
-                           rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_binding, list, [<<"/">>])));
+            rabbit_ct_helpers:await_condition(
+              fun() ->
+                      Bindings ==
+                          lists:sort(
+                            rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_binding, list, [<<"/">>]))
+              end);
         Skip ->
             Skip
     end.

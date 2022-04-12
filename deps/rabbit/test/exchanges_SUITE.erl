@@ -291,7 +291,6 @@ invalid_exchange(Config) ->
                                            routing_key = Q})).
 
 from_mnesia_to_khepri(Config) ->
-    %% TODO list exchanges and topic exchange
     Server = rabbit_ct_broker_helpers:get_node_config(Config, 0, nodename),
     
     Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
