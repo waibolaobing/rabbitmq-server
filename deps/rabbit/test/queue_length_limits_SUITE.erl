@@ -22,28 +22,37 @@
 
 all() ->
     [
-      {group, parallel_tests}
+      {group, mnesia_parallel_tests},
+      {group, khepri_parallel_tests}
     ].
 
 groups() ->
-    MaxLengthTests = [max_length_default,
-                      max_length_bytes_default,
-                      max_length_drop_head,
-                      max_length_bytes_drop_head,
-                      max_length_reject_confirm,
-                      max_length_bytes_reject_confirm,
-                      max_length_drop_publish,
-                      max_length_drop_publish_requeue,
-                      max_length_bytes_drop_publish],
     [
-      {parallel_tests, [parallel], [
-          {max_length_classic, [], MaxLengthTests},
-          {max_length_quorum, [], [max_length_default,
-                                   max_length_bytes_default]
-          },
-          {max_length_mirrored, [], MaxLengthTests}
+     {mnesia_parallel_tests, [parallel], [
+          {max_length_classic, [], max_length_tests()},
+          {max_length_quorum, [], max_length_quorum_tests()},
+          {max_length_mirrored, [], max_length_tests()}
+       ]},
+     {khepri_parallel_tests, [parallel], [
+          {max_length_classic, [], max_length_tests()},
+          {max_length_quorum, [], max_length_quorum_tests()}
        ]}
     ].
+
+max_length_tests() ->
+    [max_length_default,
+     max_length_bytes_default,
+     max_length_drop_head,
+     max_length_bytes_drop_head,
+     max_length_reject_confirm,
+     max_length_bytes_reject_confirm,
+     max_length_drop_publish,
+     max_length_drop_publish_requeue,
+     max_length_bytes_drop_publish].
+
+max_length_quorum_tests() ->
+    [max_length_default,
+     max_length_bytes_default].
 
 suite() ->
     [
@@ -84,7 +93,14 @@ init_per_group(max_length_mirrored, Config) ->
                          {queue_args, [{<<"x-queue-type">>, longstr, <<"classic">>}]},
                          {queue_durable, false}]),
     rabbit_ct_helpers:run_steps(Config1, []);
-init_per_group(Group, Config) ->
+init_per_group(mnesia_parallel_tests = Group, Config) ->
+    init_per_group0(Group, Config);
+init_per_group(khepri_parallel_tests = Group, Config0) ->
+    Config = init_per_group0(Group, Config0),
+    rabbit_ct_broker_helpers:enable_feature_flag(Config, raft_based_metadata_store_phase1),
+    Config.
+
+init_per_group0(Group, Config) ->
     case lists:member({group, Group}, all()) of
         true ->
             ClusterSize = 3,
@@ -93,8 +109,8 @@ init_per_group(Group, Config) ->
                 {rmq_nodes_count, ClusterSize}
               ]),
             rabbit_ct_helpers:run_steps(Config1,
-              rabbit_ct_broker_helpers:setup_steps() ++
-              rabbit_ct_client_helpers:setup_steps());
+                                        rabbit_ct_broker_helpers:setup_steps() ++
+                                            rabbit_ct_client_helpers:setup_steps());
         false ->
             rabbit_ct_helpers:run_steps(Config, [])
     end.
