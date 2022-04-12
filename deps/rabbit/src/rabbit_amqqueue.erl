@@ -54,7 +54,8 @@
          delete_crashed/2,
          delete_crashed_internal/2]).
 -export([update_in_tx/2, lookup_durable_queue/1, list_in_khepri_tx/1]).
--export([list_in_mnesia/1, list_in_khepri/1, list_table/1, update_in_mnesia/2, update_in_khepri/2]).
+-export([list_in_mnesia/1, list_in_mnesia/2, list_in_khepri/1, list_table/1,
+         update_in_mnesia/2, update_in_khepri/2]).
 
 -export([pid_of/1, pid_of/2]).
 -export([mark_local_durable_queues_stopped/1]).
