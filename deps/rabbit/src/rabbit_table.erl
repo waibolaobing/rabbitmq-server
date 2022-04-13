@@ -317,14 +317,7 @@ definitions(ram) ->
         {Tab, TabDef} <- definitions()].
 
 definitions() ->
-    PreKhepriDefs = pre_khepri_definitions(),
-    [{rabbit_listener,
-      [{record_name, listener},
-       {attributes, record_info(fields, listener)},
-       {type, bag},
-       {match, #listener{_='_'}}]}
-    ]
-        ++ PreKhepriDefs
+    pre_khepri_definitions()
         ++ gm:table_definitions()
         ++ mirrored_supervisor:table_definitions().
 
@@ -417,7 +410,12 @@ pre_khepri_definitions() ->
        {attributes, record_info(fields, topic_trie_binding)},
        {type, ordered_set},
        {match, #topic_trie_binding{trie_binding = trie_binding_match(),
-                                   _='_'}}]}
+                                   _='_'}}]},
+     {rabbit_listener,
+      [{record_name, listener},
+       {attributes, record_info(fields, listener)},
+       {type, bag},
+       {match, #listener{_='_'}}]}
     ].
 
 binding_match() ->

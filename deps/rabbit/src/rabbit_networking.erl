@@ -36,6 +36,8 @@
          ranch_ref/1, ranch_ref/2, ranch_ref_of_protocol/1,
          listener_of_protocol/1, stop_ranch_listener_of_protocol/1]).
 
+-export([mnesia_write_to_khepri/1, clear_data_in_khepri/0]).
+
 %% Used by TCP-based transports, e.g. STOMP adapter
 -export([tcp_listener_addresses/1,
          tcp_listener_spec/9, tcp_listener_spec/10,
@@ -52,6 +54,7 @@
     connections_local/0
 ]).
 
+-include_lib("khepri/include/khepri.hrl").
 -include_lib("rabbit_common/include/rabbit.hrl").
 -include_lib("rabbit_common/include/rabbit_misc.hrl").
 
@@ -227,18 +230,34 @@ ranch_ref_of_protocol(Protocol) ->
 
 -spec listener_of_protocol(atom()) -> #listener{}.
 listener_of_protocol(Protocol) ->
-    rabbit_misc:execute_mnesia_transaction(
-        fun() ->
-            MatchSpec = #listener{
-                node = node(),
-                protocol = Protocol,
-                _ = '_'
-            },
-            case mnesia:match_object(rabbit_listener, MatchSpec, read) of
-                []    -> undefined;
-                [Row] -> Row
-            end
-        end).
+    rabbit_khepri:try_mnesia_or_khepri(
+      fun() ->
+              rabbit_misc:execute_mnesia_transaction(
+                fun() ->
+                        MatchSpec = #listener{
+                                       node = node(),
+                                       protocol = Protocol,
+                                       _ = '_'
+                                      },
+                        case mnesia:match_object(rabbit_listener, MatchSpec, read) of
+                            []    -> undefined;
+                            [Row] -> Row
+                        end
+                end)
+      end,
+      fun() ->
+              Path = khepri_listener_path(node()),
+              {ok, Set} = rabbit_khepri:get_data(Path),
+              Ls = sets:fold(fun(#listener{protocol = P} = Listener, Acc) when P == Protocol ->
+                                     [Listener | Acc];
+                                (_, Acc) ->
+                                     Acc
+                             end, [], Set),
+              case Ls of
+                  [] -> undefined;
+                  [L] -> L
+              end
+      end).
 
 -spec stop_ranch_listener_of_protocol(atom()) -> ok | {error, not_found}.
 stop_ranch_listener_of_protocol(Protocol) ->
@@ -332,14 +351,33 @@ tcp_listener_started(Protocol, Opts, IPAddress, Port) ->
     %% We need the ip to distinguish e.g. 0.0.0.0 and 127.0.0.1
     %% We need the host so we can distinguish multiple instances of the above
     %% in a cluster.
-    ok = mnesia:dirty_write(
-           rabbit_listener,
-           #listener{node = node(),
-                     protocol = Protocol,
-                     host = tcp_host(IPAddress),
-                     ip_address = IPAddress,
-                     port = Port,
-                     opts = Opts}).
+    Node = node(),
+    Listener = #listener{node = Node,
+                         protocol = Protocol,
+                         host = tcp_host(IPAddress),
+                         ip_address = IPAddress,
+                         port = Port,
+                         opts = Opts},
+    rabbit_khepri:try_mnesia_or_khepri(
+      fun() ->
+              ok = mnesia:dirty_write(rabbit_listener, Listener)
+      end,
+      fun() -> add_listener_in_khepri(Listener) end).
+
+add_listener_in_khepri(#listener{node = Node} = Listener) ->
+    rabbit_khepri:transaction(
+      fun() ->
+              Path = khepri_listener_path(Node),
+              Set0 = case khepri_tx:get(Path) of
+                         {ok, #{Path := #{data := S}}} -> S;
+                         _ -> sets:new()
+                     end,
+              Set = sets:add_element(Listener, Set0),
+              case khepri_tx:put(Path, #kpayload_data{data = Set}) of
+                  {ok, _} -> ok;
+                  Error -> khepri_tx:abort(Error)
+              end
+      end).
 
 -spec tcp_listener_stopped
         (_, _,
@@ -350,14 +388,41 @@ tcp_listener_started(Protocol, Opts, IPAddress, Port) ->
             'ok'.
 
 tcp_listener_stopped(Protocol, Opts, IPAddress, Port) ->
-    ok = mnesia:dirty_delete_object(
-           rabbit_listener,
-           #listener{node = node(),
-                     protocol = Protocol,
-                     host = tcp_host(IPAddress),
-                     ip_address = IPAddress,
-                     port = Port,
-                     opts = Opts}).
+    Node = node(),
+    Listener = #listener{node = Node,
+                         protocol = Protocol,
+                         host = tcp_host(IPAddress),
+                         ip_address = IPAddress,
+                         port = Port,
+                         opts = Opts},
+    rabbit_khepri:try_mnesia_or_khepri(
+      fun() ->
+              ok = mnesia:dirty_delete_object(rabbit_listener, Listener)
+      end,
+      fun() ->
+              rabbit_khepri:transaction(
+                fun() ->
+                        Path = khepri_listener_path(Node),
+                        case khepri_tx:get_data(Listener) of
+                            {ok, Set0} ->
+                                Set = sets:del_element(Listener, Set0),
+                                case sets:is_empty(Set) of
+                                    true ->
+                                        case khepri_tx:delete(Path) of
+                                            {ok, _} -> ok;
+                                            Error -> khepri_tx:abort(Error)
+                                        end;
+                                    false ->
+                                        case khepri_tx:put(Path, #kpayload_data{data = Set}) of
+                                            {ok, _} -> ok;
+                                            Error -> khepri_tx:abort(Error)
+                                        end
+                                end;
+                            _ ->
+                                ok
+                        end
+                end)
+      end).
 
 -spec record_distribution_listener() -> ok | no_return().
 
@@ -378,7 +443,16 @@ active_listeners() ->
 -spec node_listeners(node()) -> [rabbit_types:listener()].
 
 node_listeners(Node) ->
-    mnesia:dirty_read(rabbit_listener, Node).
+    rabbit_khepri:try_mnesia_or_khepri(
+      fun() ->
+              mnesia:dirty_read(rabbit_listener, Node)
+      end,
+      fun() ->
+              case rabbit_khepri:get_data(khepri_listener_path(Node)) of
+                  {ok, Set} -> sets:to_list(Set);
+                  _ -> []
+              end
+      end).
 
 -spec node_client_listeners(node()) -> [rabbit_types:listener()].
 
@@ -398,7 +472,13 @@ on_node_down(Node) ->
         false ->
             rabbit_log:info(
                    "Node ~s is down, deleting its listeners", [Node]),
-            ok = mnesia:dirty_delete(rabbit_listener, Node);
+            rabbit_khepri:try_mnesia_or_khepri(
+              fun() ->
+                      ok = mnesia:dirty_delete(rabbit_listener, Node)
+              end,
+              fun() ->
+                      rabbit_khepri:delete(khepri_listener_path(Node))
+              end);
         true  ->
             rabbit_log:info(
                    "Keeping ~s listeners: the node is already back", [Node])
@@ -693,4 +773,20 @@ ipv6_status(TestPort) ->
         %% Port in use
         {error, _} ->
             ipv6_status(TestPort + 1)
+    end.
+
+khepri_listener_path(Node) ->
+    [?MODULE, listeners, Node].
+
+khepri_listeners_path() ->
+    [?MODULE, listeners].
+
+mnesia_write_to_khepri(Listener) ->
+    add_listener_in_khepri(Listener).
+
+clear_data_in_khepri() ->
+    Path = khepri_listeners_path(),
+    case rabbit_khepri:delete(Path) of
+        ok    -> ok;
+        Error -> throw(Error)
     end.

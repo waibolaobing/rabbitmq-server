@@ -252,7 +252,8 @@ user_limits_migration(_FeatureName, _FeatureProps, post_enabled_locally) ->
                             rabbit_reverse_route,
                             rabbit_topic_trie_node,
                             rabbit_topic_trie_edge,
-                            rabbit_topic_trie_binding]).
+                            rabbit_topic_trie_binding,
+                            rabbit_listener]).
 
 -define(MDS_PHASE1_TABLES, [rabbit_vhost,
                             rabbit_user,
@@ -555,6 +556,10 @@ clear_data_from_previous_attempt(
   FeatureName, [rabbit_topic_trie_binding | Rest]) ->
     ok = rabbit_exchange_type_topic:clear_data_in_khepri(),
     clear_data_from_previous_attempt(FeatureName, Rest);
+clear_data_from_previous_attempt(
+  FeatureName, [rabbit_listener | Rest]) ->
+    ok = rabbit_networking:clear_data_in_khepri(),
+    clear_data_from_previous_attempt(FeatureName, Rest);
 clear_data_from_previous_attempt(_, []) ->
     ok.
 
@@ -665,6 +670,11 @@ copy_from_mnesia_to_khepri(
     Fun = fun rabbit_exchange_type_topic:mnesia_write_to_khepri/1,
     do_copy_from_mnesia_to_khepri(FeatureName, Table, Fun),
     copy_from_mnesia_to_khepri(FeatureName, Rest);
+copy_from_mnesia_to_khepri(
+  FeatureName, [rabbit_listener = Table | Rest]) ->
+    Fun = fun rabbit_networking:mnesia_write_to_khepri/1,
+    do_copy_from_mnesia_to_khepri(FeatureName, Table, Fun),
+    copy_from_mnesia_to_khepri(FeatureName, Rest);
 copy_from_mnesia_to_khepri(_, []) ->
     ok.
 
@@ -696,13 +706,12 @@ do_copy_from_mnesia_to_khepri(
         _ ->
             ok
     end,
-    case mnesia:dirty_read(Table, Key) of
-        [Record] -> ok = Fun(Record);
-        []       -> ok
-    end,
+    %% rabbit_listener is a bag, so this query might return a list of records
+    Records = mnesia:dirty_read(Table, Key),
+    lists:foreach(fun(Record) -> Fun(Record) end, Records),
     NextKey = mnesia:dirty_next(Table, Key),
     do_copy_from_mnesia_to_khepri(
-      FeatureName, Table, NextKey, Fun, Count, Copied + 1).
+      FeatureName, Table, NextKey, Fun, Count, Copied + length(Records)).
 
 final_sync_from_mnesia_to_khepri(FeatureName, Tables) ->
     %% Switch all tables to read-only. All concurrent and future Mnesia
