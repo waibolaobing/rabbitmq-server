@@ -75,6 +75,7 @@
          mnesia_delete_queue_to_khepri/1, mnesia_delete_durable_queue_to_khepri/1,
          clear_queue_data_in_khepri/0, clear_durable_queue_data_in_khepri/0,
          lookup_in_khepri/2]).
+-export([mnesia_delete_to_khepri/1, mnesia_delete_durable_to_khepri/1]).
 
 %% internal
 -export([internal_declare/2, internal_delete/2, run_backing_queue/3,
@@ -2406,7 +2407,7 @@ delete_queue_in_mnesia(QueueName) ->
     rabbit_binding:remove_transient_for_destination_in_mnesia(QueueName).
 
 delete_queue_in_khepri(QueueName) ->
-    ok = khepri_tx:delete(khepri_queue_path(QueueName)),
+    {ok, _} = khepri_tx:delete(khepri_queue_path(QueueName)),
     rabbit_binding:remove_transient_for_destination_in_khepri(QueueName).
 
 % If there are many queues and we delete them all in a single Mnesia transaction,
@@ -2572,6 +2573,20 @@ clear_queue_data_in_khepri() ->
 
 clear_durable_queue_data_in_khepri() ->
     Path = khepri_durable_queues_path(),
+    case rabbit_khepri:delete(Path) of
+        ok    -> ok;
+        Error -> throw(Error)
+    end.
+
+mnesia_delete_to_khepri(#resource{} = Name) ->
+    Path = khepri_queue_path(Name),
+    case rabbit_khepri:delete(Path) of
+        ok    -> ok;
+        Error -> throw(Error)
+    end.
+
+mnesia_delete_durable_to_khepri(#resource{} = Name) ->
+    Path = khepri_durable_queue_path(Name),
     case rabbit_khepri:delete(Path) of
         ok    -> ok;
         Error -> throw(Error)

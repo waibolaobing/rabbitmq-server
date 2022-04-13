@@ -641,17 +641,43 @@ from_mnesia_to_khepri(Config) ->
     Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
     Q = ?config(queue_name, Config),
     ?assertEqual({'queue.declare_ok', Q, 0, 0}, declare(Ch, Q, [])),
-    
+    AltQ = ?config(alt_queue_name, Config),
+    ?assertEqual({'queue.declare_ok', AltQ, 0, 0}, declare(Ch, AltQ, [], false)),
+
+    %% Combine durable and transient queues and exchanges to test the migration of durable,
+    %% semi-durable and transient bindings
     #'queue.bind_ok'{} = amqp_channel:call(Ch, #'queue.bind'{exchange = <<"amq.direct">>,
                                                              queue = Q,
                                                              routing_key = Q}),
+    #'queue.bind_ok'{} = amqp_channel:call(Ch, #'queue.bind'{exchange = <<"amq.direct">>,
+                                                             queue = AltQ,
+                                                             routing_key = AltQ}),
+
+    X = ?config(exchange_name, Config),
+    #'exchange.declare_ok'{} = amqp_channel:call(Ch, #'exchange.declare'{exchange = X,
+                                                                         durable = false}),
+    #'queue.bind_ok'{} = amqp_channel:call(Ch, #'queue.bind'{exchange = X,
+                                                             queue = Q,
+                                                             routing_key = Q}),
+    #'queue.bind_ok'{} = amqp_channel:call(Ch, #'queue.bind'{exchange = X,
+                                                             queue = AltQ,
+                                                             routing_key = AltQ}),
+
     
     DefaultExchange = rabbit_misc:r(<<"/">>, exchange, <<>>),
     QResource = rabbit_misc:r(<<"/">>, queue, Q),
+    AltQResource = rabbit_misc:r(<<"/">>, queue, AltQ),
     DefaultBinding = binding_record(DefaultExchange, QResource, Q, []),
     DirectBinding = binding_record(rabbit_misc:r(<<"/">>, exchange, <<"amq.direct">>),
                                    QResource, Q, []),
-    Bindings = lists:sort([DefaultBinding, DirectBinding]),
+    AltDefaultBinding = binding_record(DefaultExchange, AltQResource, AltQ, []),
+    AltDirectBinding = binding_record(rabbit_misc:r(<<"/">>, exchange, <<"amq.direct">>),
+                                      AltQResource, AltQ, []),
+    XBinding = binding_record(rabbit_misc:r(<<"/">>, exchange, X), QResource, Q, []),
+    AltXBinding = binding_record(rabbit_misc:r(<<"/">>, exchange, X),
+                                 AltQResource, AltQ, []),
+    Bindings = lists:sort([DefaultBinding, DirectBinding, AltDefaultBinding, AltDirectBinding,
+                          XBinding, AltXBinding]),
     
     ?assertEqual(Bindings,
                  lists:sort(

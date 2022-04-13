@@ -296,6 +296,11 @@ from_mnesia_to_khepri(Config) ->
     Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
     Q = ?config(queue_name, Config),
     ?assertEqual({'queue.declare_ok', Q, 0, 0}, declare(Ch, Q, [])),
+
+    %% Test transient exchanges
+    X = ?config(exchange_name, Config),
+    #'exchange.declare_ok'{} = amqp_channel:call(Ch, #'exchange.declare'{exchange = X,
+                                                                         durable = false}),
     
     %% Topic is the only exchange type that has its own mnesia/khepri tables.
     %% Let's test that the exchange works as expected after migration
@@ -310,19 +315,20 @@ from_mnesia_to_khepri(Config) ->
                             rabbit_misc:r(<<"/">>, exchange, <<"amq.headers">>),
                             rabbit_misc:r(<<"/">>, exchange, <<"amq.match">>),
                             rabbit_misc:r(<<"/">>, exchange, <<"amq.rabbitmq.trace">>),
-                            rabbit_misc:r(<<"/">>, exchange, <<"amq.topic">>)]),
+                            rabbit_misc:r(<<"/">>, exchange, <<"amq.topic">>),
+                            rabbit_misc:r(<<"/">>, exchange, X)]),
     ?assertEqual(
        Exchanges,
-       lists:sort([X#exchange.name ||
-                      X <- rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_exchange, list, [])])),
+       lists:sort([X0#exchange.name ||
+                      X0 <- rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_exchange, list, [])])),
     
     case rabbit_ct_broker_helpers:enable_feature_flag(Config, raft_based_metadata_store_phase1) of
         ok ->
             rabbit_ct_helpers:await_condition(
               fun() ->
                       RecoveredExchanges =
-                          lists:sort([X#exchange.name ||
-                                         X <- rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_exchange, list, [])]),
+                          lists:sort([X0#exchange.name ||
+                                         X0 <- rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_exchange, list, [])]),
                       Exchanges == RecoveredExchanges
               end),
             publish(Ch, Topic, <<"this.queue.rules">>, <<"msg1">>),

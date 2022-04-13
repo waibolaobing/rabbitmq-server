@@ -413,4 +413,5 @@ mnesia_write_to_khepri(#topic_trie_binding{trie_binding = #trie_binding{exchange
                                    sets:to_list(SetOfBindings) ++ Acc
                            end, [], maps:values(Map)),
     [internal_add_binding_in_khepri(X, K, D, Args) || #binding{key = K,
-                                                               args = Args} <- Bindings].
+                                                               args = Args} <- Bindings],
+    ok.

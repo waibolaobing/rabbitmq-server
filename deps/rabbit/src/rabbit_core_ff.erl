@@ -778,6 +778,9 @@ handle_mnesia_write(NewRecord) ->
 
 %% TODO handle mnesia_runtime_parameters, rabbit_amqqueue, rabbit_exchange, rabbit_binding,
 %% rabbit_exchange_type_topic
+%% TODO do we need to listen to detailed events? If we receive an amqqueue record, we don't
+%% know if it belongs to queue or durable queues. On node down we remove the ram copy of queues
+%% that live on the down node but they might still be durable
 handle_mnesia_delete(OldRecord) when ?is_vhost(OldRecord) ->
     rabbit_vhost:mnesia_delete_to_khepri(OldRecord);
 handle_mnesia_delete(OldRecord) when ?is_internal_user(OldRecord) ->
@@ -796,7 +799,12 @@ handle_mnesia_delete(rabbit_user_permission, UserVHost) ->
 handle_mnesia_delete(rabbit_topic_permission, TopicPermissionKey) ->
     rabbit_auth_backend_internal:mnesia_delete_to_khepri(TopicPermissionKey);
 handle_mnesia_delete(rabbit_runtime_parameters, RuntimeParamKey) ->
-    rabbit_runtime_parameters:mnesia_delete_to_khepri(RuntimeParamKey).
+    rabbit_runtime_parameters:mnesia_delete_to_khepri(RuntimeParamKey);
+handle_mnesia_delete(rabbit_queue, QName) ->
+    rabbit_amqqueue:mnesia_delete_to_khepri(QName);
+handle_mnesia_delete(rabbit_durable_queue, QName) ->
+    rabbit_amqqueue:mnesia_delete_durable_to_khepri(QName).
+
 
 %% We can't remove unused tables at this point yet. The reason is that tables
 %% are synchronized before feature flags in `rabbit_mnesia`. So if a node is
