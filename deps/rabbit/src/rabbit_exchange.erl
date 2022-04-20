@@ -835,7 +835,6 @@ internal_delete_in_mnesia(X = #exchange{name = XName}, OnlyDurable, RemoveBindin
 
 internal_delete_in_khepri(X = #exchange{name = XName}, OnlyDurable, RemoveBindingsForSource) ->
     {ok, _} = khepri_tx:delete(khepri_exchange_path(XName)),
-    {ok, _} = khepri_tx:delete(khepri_exchange_serial_path(XName)),
     %% TODO bindings...
     Bindings = case RemoveBindingsForSource of
         true  -> rabbit_binding:remove_for_source_in_khepri(XName);

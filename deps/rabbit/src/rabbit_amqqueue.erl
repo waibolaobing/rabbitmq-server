@@ -1682,7 +1682,7 @@ list_for_count(VHost) ->
       fun() ->
               list_with_possible_retry_in_khepri(
                 fun() ->
-                        list_in_khepri(VHost, rabbit_queue)
+                        list_in_khepri(rabbit_queue, VHost)
                 end)
       end).
 

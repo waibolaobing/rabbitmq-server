@@ -2709,7 +2709,10 @@ delete_vhost(mnesia, VHostName) ->
               rabbit_vhost:internal_delete_in_mnesia_part2(VHostName)
       end);
 delete_vhost(khepri, VHostName) ->
-    rabbit_vhost:internal_delete_in_khepri(VHostName).
+    case rabbit_vhost:internal_delete_in_khepri(VHostName, <<>>) of
+        [] -> ok;
+        Err -> Err
+    end.
 
 add_user(mnesia, Username, User) ->
     rabbit_auth_backend_internal:add_user_sans_validation_in_mnesia(
