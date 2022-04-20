@@ -272,7 +272,7 @@ end_per_testcase(Testcase, Config) ->
       TableDefs),
 
     %% Clear all data in Khepri.
-    ok = rabbit_khepri:clear_store(),
+    {ok, _} = rabbit_khepri:clear_store(),
 
     rabbit_ct_helpers:testcase_finished(Config, Testcase).
 

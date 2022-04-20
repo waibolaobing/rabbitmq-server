@@ -373,7 +373,7 @@ add_listener_in_khepri(#listener{node = Node} = Listener) ->
                          _ -> sets:new()
                      end,
               Set = sets:add_element(Listener, Set0),
-              case khepri_tx:put(Path, #kpayload_data{data = Set}) of
+              case khepri_tx:put(Path, Set) of
                   {ok, _} -> ok;
                   Error -> khepri_tx:abort(Error)
               end
@@ -413,7 +413,7 @@ tcp_listener_stopped(Protocol, Opts, IPAddress, Port) ->
                                             Error -> khepri_tx:abort(Error)
                                         end;
                                     false ->
-                                        case khepri_tx:put(Path, #kpayload_data{data = Set}) of
+                                        case khepri_tx:put(Path, Set) of
                                             {ok, _} -> ok;
                                             Error -> khepri_tx:abort(Error)
                                         end
@@ -787,6 +787,6 @@ mnesia_write_to_khepri(Listener) ->
 clear_data_in_khepri() ->
     Path = khepri_listeners_path(),
     case rabbit_khepri:delete(Path) of
-        ok    -> ok;
+        {ok, _} -> ok;
         Error -> throw(Error)
     end.

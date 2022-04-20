@@ -51,7 +51,8 @@
          info_in_mnesia/1,
          info_in_khepri/1,
          internal_delete_in_mnesia_part1/2,
-         internal_delete_in_mnesia_part2/1]).
+         internal_delete_in_mnesia_part2/1,
+         internal_delete_in_khepri/2]).
 -endif.
 
 %%
@@ -230,7 +231,7 @@ do_add_to_khepri(Name, Description, Tags) ->
     NewVHost = vhost:new(
                  Name, [], #{description => Description, tags => Tags}),
     case rabbit_khepri:create(Path, NewVHost) of
-        ok ->
+        {ok, _} ->
             NewVHost;
         {error, {mismatching_node,
                  #{node_path := Path,
@@ -298,9 +299,9 @@ update_in_khepri(Name, Description, Tags) ->
             rabbit_log:debug("Updating a virtual host record ~p", [VHost]),
             Path1 = khepri_path:combine_with_conditions(
                       Path, [#if_payload_version{version = DVersion}]),
-            Ret2 = rabbit_khepri:insert(Path1, VHost),
+            Ret2 = rabbit_khepri:put(Path1, VHost),
             case Ret2 of
-                ok ->
+                {ok, _} ->
                     {ok, VHost};
                 {error, {mismatching_node, #{node_path := Path}}} ->
                     update_in_khepri(Name, Description, Tags);
@@ -481,7 +482,7 @@ internal_delete_in_khepri(VHost, ActingUser) ->
     Fs2 = [rabbit_policy:delete(VHost, proplists:get_value(name, Info), ActingUser)
            || Info <- rabbit_policy:list(VHost)],
     Path = khepri_vhost_path(VHost),
-    ok = rabbit_khepri:delete(Path),
+    {ok, _} = rabbit_khepri:delete(Path),
     Fs1 ++ Fs2.
 
 internal_delete_in_mnesia_part1(VHost, ActingUser) ->
@@ -651,8 +652,8 @@ update_in_khepri(VHostName, Fun) ->
             V1 = Fun(V),
             Path1 = khepri_path:combine_with_conditions(
                       Path, [#if_payload_version{version = DVersion}]),
-            case rabbit_khepri:insert(Path1, V1) of
-                ok ->
+            case rabbit_khepri:put(Path1, V1) of
+                {ok, _} ->
                     V1;
                 {error, {mismatching_node, _}} ->
                     update(VHostName, Fun);
@@ -802,15 +803,15 @@ info_all(Items, Ref, AggregatorPid) ->
 clear_data_in_khepri() ->
     Path = khepri_vhosts_path(),
     case rabbit_khepri:delete(Path) of
-        ok    -> ok;
+        {ok, _} -> ok;
         Error -> throw(Error)
     end.
 
 mnesia_write_to_khepri(VHost) when ?is_vhost(VHost) ->
     Name = vhost:get_name(VHost),
     Path = khepri_vhost_path(Name),
-    case rabbit_khepri:insert(Path, VHost) of
-        ok    -> ok;
+    case rabbit_khepri:put(Path, VHost) of
+        {ok, _} -> ok;
         Error -> throw(Error)
     end.
 
@@ -818,7 +819,7 @@ mnesia_delete_to_khepri(VHost) when ?is_vhost(VHost) ->
     Name = vhost:get_name(VHost),
     Path = khepri_vhost_path(Name),
     case rabbit_khepri:delete(Path) of
-        ok    -> ok;
+        {ok, _} -> ok;
         Error -> throw(Error)
     end.
 

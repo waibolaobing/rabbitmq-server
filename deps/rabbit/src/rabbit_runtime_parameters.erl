@@ -202,7 +202,7 @@ mnesia_update_fun(Key, Term) ->
 
 khepri_update(Key, Term) ->
     Path = khepri_rp_path(Key),
-    case rabbit_khepri:put(Path, #kpayload_data{data = c(Key, Term)}) of
+    case rabbit_khepri:put(Path, c(Key, Term)) of
         {ok, #{Path := #{data := Params}}} ->
             {old, Params#runtime_parameters.value};
         {ok, _} ->
@@ -217,7 +217,7 @@ khepri_update(VHost, Comp, Name, Term) ->
 khepri_update_fun(Key, Term) ->
     Path = khepri_rp_path(Key),
     fun () ->
-            case khepri_tx:put(Path, #kpayload_data{data = c(Key, Term)}) of
+            case khepri_tx:put(Path, c(Key, Term)) of
                 {ok, #{Path := #{data := Params}}} ->
                     {old, Params#runtime_parameters.value};
                 {ok, _} ->
@@ -317,7 +317,8 @@ mnesia_clear(VHost, Component, Name) ->
 
 khepri_clear(Key) ->
     Path = khepri_rp_path(Key),
-    ok = rabbit_khepri:delete(Path).
+    {ok, _} = rabbit_khepri:delete(Path),
+    ok.
 
 khepri_clear(VHost, Component, Name) ->
     Path = khepri_rp_path({VHost, Component, Name}),
@@ -564,7 +565,7 @@ lookup_missing_in_khepri(Key, Default) ->
                   {ok, #{Path := #{data := R}}} ->
                       R;
                   {ok, _} ->
-                      khepri_tx:put(Path, #kpayload_data{data = Record}),
+                      khepri_tx:put(Path, Record),
                       Record
               end
       end, rw).
@@ -600,22 +601,22 @@ khepri_vhost_rp_path(VHost, Component, Name) ->
 clear_data_in_khepri() ->
     Path = khepri_rp_path(),
     case rabbit_khepri:delete(Path) of
-        ok    -> ok;
+        {ok, _} -> ok;
         Error -> throw(Error)
     end.
 
 mnesia_write_to_khepri(
   #runtime_parameters{key = {VHost, Comp, Name}} = RuntimeParam) ->
     Path = khepri_vhost_rp_path(VHost, Comp, Name),
-    case rabbit_khepri:insert(Path, RuntimeParam) of
-        ok    -> ok;
+    case rabbit_khepri:put(Path, RuntimeParam) of
+        {ok, _} -> ok;
         Error -> throw(Error)
     end;
 mnesia_write_to_khepri(
   #runtime_parameters{key = Key} = RuntimeParam) ->
     Path = khepri_global_rp_path(Key),
-    case rabbit_khepri:insert(Path, RuntimeParam) of
-        ok    -> ok;
+    case rabbit_khepri:put(Path, RuntimeParam) of
+        {ok, _} -> ok;
         Error -> throw(Error)
     end.
 
@@ -623,14 +624,14 @@ mnesia_delete_to_khepri(
   #runtime_parameters{key = {VHost, Comp, Name}}) ->
     Path = khepri_vhost_rp_path(VHost, Comp, Name),
     case rabbit_khepri:delete(Path) of
-        ok    -> ok;
+        {ok, _} -> ok;
         Error -> throw(Error)
     end;
 mnesia_delete_to_khepri(
   #runtime_parameters{key = Key}) ->
     Path = khepri_global_rp_path(Key),
     case rabbit_khepri:delete(Path) of
-        ok    -> ok;
+        {ok, _} -> ok;
         Error -> throw(Error)
     end.
 

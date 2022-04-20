@@ -768,7 +768,7 @@ add_binding(Binding, BindingType) ->
       fun() ->
               Data0 = #{bindings := Set} = bindings_data(Path, BindingType),
               Data = Data0#{bindings => sets:add_element(Binding, Set)},
-              {ok, _} = khepri_tx:put(Path, #kpayload_data{data = Data}),
+              {ok, _} = khepri_tx:put(Path, Data),
               add_routing(Binding),
               ok
       end, rw).
@@ -777,9 +777,9 @@ add_routing(#binding{destination = Dst} = Binding) ->
     Path = khepri_routing_path(Binding),
     case khepri_tx:get(Path) of
         {ok, #{Path := #{data := Data}}} ->
-            {ok, _} = khepri_tx:put(Path, #kpayload_data{data = sets:add_element(Dst, Data)});
+            {ok, _} = khepri_tx:put(Path, sets:add_element(Dst, Data));
         _ ->
-            {ok, _} = khepri_tx:put(Path, #kpayload_data{data = sets:add_element(Dst, sets:new())})
+            {ok, _} = khepri_tx:put(Path, sets:add_element(Dst, sets:new()))
     end.
 
 delete_binding(Binding) ->
@@ -791,7 +791,7 @@ delete_binding(Binding) ->
                 true ->
                     khepri_tx:delete(Path);
                 false ->
-                    {ok, _} = khepri_tx:put(Path, #kpayload_data{data = Data#{bindings => Set}})
+                    {ok, _} = khepri_tx:put(Path, Data#{bindings => Set})
             end;
         _ ->
             ok
@@ -808,7 +808,7 @@ delete_routing(#binding{destination = Dst} = Binding) ->
                 true ->
                     khepri_tx:delete(Path);
                 false ->
-                    {ok, _} = khepri_tx:put(Path, #kpayload_data{data = Data})
+                    {ok, _} = khepri_tx:put(Path, Data)
             end;
         _ ->
             ok
@@ -1218,9 +1218,9 @@ clear_route_in_khepri() ->
     Path = khepri_routes_path(),
     RoutingPath = khepri_routing_path(),
     case rabbit_khepri:delete(Path) of
-        ok ->
+        {ok, _} ->
             case rabbit_khepri:delete(RoutingPath) of
-                ok -> ok;
+                {ok, _} -> ok;
                 Error -> throw(Error)
             end;
         Error -> throw(Error)

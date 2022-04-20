@@ -120,7 +120,7 @@ remove_bindings_in_khepri(Bs) ->
                                    %% TODO can we use a keep_while condition?
                                    remove_path_if_empty_in_khepri(lists:droplast(Path));
                                _ ->
-                                   khepri_tx:put(Path, #kpayload_data{data = Set})
+                                   khepri_tx:put(Path, Set)
                            end;
                        _ ->
                            ok
@@ -154,7 +154,8 @@ delete_in_mnesia(X) ->
     ok.
 
 delete_in_khepri(X) ->
-    rabbit_khepri:delete(khepri_exchange_type_topic_path(X)).
+    {ok, _} = rabbit_khepri:delete(khepri_exchange_type_topic_path(X)),
+    ok.
 
 internal_add_binding(#binding{source = X, key = K, destination = D, args = Args}) ->
     rabbit_khepri:try_mnesia_or_khepri(
@@ -175,7 +176,7 @@ internal_add_binding_in_khepri(X, K, D, Args) ->
                          _ -> sets:new()
                      end,
               Set = sets:add_element(Binding, Set0),
-              {ok, _} = khepri_tx:put(Path, #kpayload_data{data = Set}),
+              {ok, _} = khepri_tx:put(Path, Set),
               ok
       end, rw).
 
@@ -396,7 +397,7 @@ split_topic_key(<<C:8, Rest/binary>>, RevWordAcc, RevResAcc) ->
 clear_data_in_khepri() ->
     Path = [?MODULE, topic_trie_binding],
     case rabbit_khepri:delete(Path) of
-        ok    -> ok;
+        {ok, _} -> ok;
         Error -> throw(Error)
     end.
 

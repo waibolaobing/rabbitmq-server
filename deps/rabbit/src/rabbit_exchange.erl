@@ -245,7 +245,7 @@ store_ram_in_mnesia(X) ->
 
 store_in_khepri(X) ->
     Path = khepri_exchange_path(X#exchange.name),
-    {ok, _} = khepri_tx:put(Path, #kpayload_data{data = X}),
+    {ok, _} = khepri_tx:put(Path, X),
     X.
 
 %% Used with binaries sent over the wire; the type may not exist.
@@ -542,7 +542,7 @@ update_decorators_in_khepri(Path, VHost, Name) ->
             X1 = rabbit_exchange_decorator:set(X),
             Conditions = #if_all{conditions = [Name, #if_payload_version{version = Vsn}]},
             UpdatePath = khepri_exchanges_path() ++ [VHost, Conditions],
-            rabbit_khepri:put(UpdatePath, #kpayload_data{data = X1});
+            rabbit_khepri:put(UpdatePath, X1);
         _ ->
             ok
     end.
@@ -933,7 +933,7 @@ mnesia_write_exchange_to_khepri(
   #exchange{name = Resource} = Exchange) ->
     Path = khepri_exchange_path(Resource),
     case rabbit_khepri:create(Path, Exchange) of
-        ok    -> ok;
+        {ok, _} -> ok;
         {error, {mismatching_node, _}} -> ok;
         Error -> throw(Error)
     end.
@@ -943,7 +943,7 @@ mnesia_write_durable_exchange_to_khepri(
     Path = khepri_exchange_path(Resource),
     Exchange = rabbit_exchange_decorator:set(Exchange0),
     case rabbit_khepri:create(Path, Exchange) of
-        ok    -> ok;
+        {ok, _} -> ok;
         {error, {mismatching_node, _}} -> ok;
         Error -> throw(Error)
     end.
@@ -954,7 +954,7 @@ mnesia_write_exchange_serial_to_khepri(
                                                [#if_node_exists{exists = false}]),
     Extra = #{keep_while => #{khepri_exchange_path(Resource) => #if_node_exists{exists = true}}},
     case rabbit_khepri:put(Path, Exchange, Extra) of
-        ok    -> ok;
+        {ok, _} -> ok;
         Error -> throw(Error)
     end.
 
@@ -965,13 +965,13 @@ clear_exchange_data_in_khepri() ->
 clear_durable_exchange_data_in_khepri() ->
     Path = khepri_exchanges_path(),
     case rabbit_khepri:delete(Path) of
-        ok    -> ok;
+        {ok, _} -> ok;
         Error -> throw(Error)
     end.
 
 clear_exchange_serial_data_in_khepri() ->
     Path = khepri_exchange_serials_path(),
     case rabbit_khepri:delete(Path) of
-        ok    -> ok;
+        {ok, _} -> ok;
         Error -> throw(Error)
     end.

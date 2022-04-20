@@ -100,7 +100,7 @@ maybe_enable_khepri(Group, Config) ->
             Config
     end.
 
-init_per_multinode_group(Group, Config, NodeCount) ->
+init_per_multinode_group(_Group, Config, NodeCount) ->
     Suffix = rabbit_ct_helpers:testcase_absname(Config, "", "-"),
     Config1 = rabbit_ct_helpers:set_config(Config, [
                                                     {rmq_nodes_count, NodeCount},

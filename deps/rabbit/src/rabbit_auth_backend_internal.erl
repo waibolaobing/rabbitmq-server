@@ -419,7 +419,7 @@ add_user_sans_validation_in_mnesia(Username, User) ->
 add_user_sans_validation_in_khepri(Username, User) ->
     Path = khepri_user_path(Username),
     case rabbit_khepri:create(Path, User) of
-        ok ->
+        {ok, _} ->
             ok;
         {error, {mismatching_node, _}} ->
             throw({error, {user_already_exists, Username}});
@@ -722,7 +722,7 @@ set_permissions_in_khepri(Username, VirtualHost, UserPermission) ->
         Username, VirtualHost,
         fun() ->
                 Ret = khepri_tx:put(
-                        Path, #kpayload_data{data = UserPermission}, Extra),
+                        Path, UserPermission, Extra),
                 case Ret of
                     {ok, _} -> ok;
                     Error   -> khepri_tx:abort(Error)
@@ -809,7 +809,7 @@ update_user_in_khepri(Username, Fun) ->
         Username,
         fun () ->
                 {ok, #{Path := #{data := User}}} = khepri_tx:get(Path),
-                case khepri_tx:put(Path, #kpayload_data{data = Fun(User)}) of
+                case khepri_tx:put(Path, Fun(User)) of
                     {ok, #{Path := #{data := User}}} -> ok;
                     Error                            -> khepri_tx:abort(Error)
                 end
@@ -908,8 +908,7 @@ set_topic_permissions_in_khepri(
       rabbit_vhost:with_user_and_vhost_in_khepri(
         Username, VirtualHost,
         fun () ->
-                Ret = khepri_tx:put(
-                        Path, #kpayload_data{data = TopicPermission}, Extra),
+                Ret = khepri_tx:put(Path, TopicPermission, Extra),
                 case Ret of
                     {ok, _} -> ok;
                     Error   -> khepri_tx:abort(Error)
@@ -1550,15 +1549,15 @@ notify_limit_clear(Username, ActingUser) ->
 clear_data_in_khepri() ->
     Path = khepri_users_path(),
     case rabbit_khepri:delete(Path) of
-        ok    -> ok;
+        {ok, _} -> ok;
         Error -> throw(Error)
     end.
 
 mnesia_write_to_khepri(User) when ?is_internal_user(User) ->
     Username = internal_user:get_username(User),
     Path = khepri_user_path(Username),
-    case rabbit_khepri:insert(Path, User) of
-        ok    -> ok;
+    case rabbit_khepri:put(Path, User) of
+        {ok, _} -> ok;
         Error -> throw(Error)
     end;
 mnesia_write_to_khepri(
@@ -1604,7 +1603,7 @@ mnesia_delete_to_khepri(User) when ?is_internal_user(User) ->
     Username = internal_user:get_username(User),
     Path = khepri_user_path(Username),
     case rabbit_khepri:delete(Path) of
-        ok    -> ok;
+        {ok, _} -> ok;
         Error -> throw(Error)
     end;
 mnesia_delete_to_khepri(
@@ -1614,7 +1613,7 @@ mnesia_delete_to_khepri(
                      virtual_host = VHost}}) ->
     Path = khepri_user_permission_path(Username, VHost),
     case rabbit_khepri:delete(Path) of
-        ok    -> ok;
+        {ok, _} -> ok;
         Error -> throw(Error)
     end;
 mnesia_delete_to_khepri(
@@ -1627,7 +1626,7 @@ mnesia_delete_to_khepri(
         exchange = Exchange}}) ->
     Path = khepri_topic_permission_path(Username, VHost, Exchange),
     case rabbit_khepri:delete(Path) of
-        ok    -> ok;
+        {ok, _} -> ok;
         Error -> throw(Error)
     end.
 

@@ -24,7 +24,6 @@
          get_store_id/0,
 
          create/2,
-         insert/2,
          update/2,
          cas/3,
 
@@ -198,7 +197,7 @@ do_add_member(NewNode) when NewNode =/= node() ->
                        [NewNode, ?RA_CLUSTER_NAME],
                        #{domain => ?RMQLOG_DOMAIN_GLOBAL}),
                     ok = ensure_ra_system_started(),
-                    Ret2 = khepri:add_member(
+                    Ret2 = khepri_cluster:add_member(
                              ?RA_SYSTEM, ?RA_CLUSTER_NAME, ?RA_FRIENDLY_NAME,
                              NewNode),
 
@@ -288,7 +287,7 @@ remove_member(NodeToRemove) when NodeToRemove =/= node() ->
                [NodeToRemove, ?RA_CLUSTER_NAME],
                #{domain => ?RMQLOG_DOMAIN_GLOBAL}),
             ok = ensure_ra_system_started(),
-            Ret = khepri:remove_member(?RA_CLUSTER_NAME, NodeToRemove),
+            Ret = khepri_cluster:remove_member(?RA_CLUSTER_NAME, NodeToRemove),
             %% FIXME: Stop the Ra server? Apparently it's still running after
             %% calling this function and answers queries (like the list of
             %% locally known members).
@@ -342,10 +341,10 @@ locally_known_members() ->
     khepri:locally_known_members(?RA_CLUSTER_NAME).
 
 nodes() ->
-    khepri:nodes(?RA_CLUSTER_NAME).
+    khepri_cluster:nodes(?RA_CLUSTER_NAME).
 
 locally_known_nodes() ->
-    khepri:locally_known_nodes(?RA_CLUSTER_NAME).
+    khepri_cluster:locally_known_nodes(?RA_CLUSTER_NAME).
 
 get_store_id() ->
     ?STORE_ID.
@@ -366,7 +365,6 @@ dir() ->
 %% RabbitMQ. They might be moved to Khepri in the future.
 
 create(Path, Data) -> ?wait(khepri:create(?STORE_ID, Path, Data)).
-insert(Path, Data) -> ?wait(khepri:insert(?STORE_ID, Path, Data)).
 update(Path, Data) -> ?wait(khepri:update(?STORE_ID, Path, Data)).
 cas(Path, Pattern, Data) ->
     ?wait(khepri:compare_and_swap(?STORE_ID, Path, Pattern, Data)).
@@ -434,7 +432,7 @@ clear_payload(Path) -> ?wait(khepri:clear_payload(?STORE_ID, Path)).
 delete(Path) -> ?wait(khepri:delete(?STORE_ID, Path)).
 
 delete_or_fail(Path) ->
-    case khepri_machine:delete(?STORE_ID, Path) of
+    case khepri:delete(?STORE_ID, Path) of
         {ok, Result} ->
             case maps:size(Result) of
                 0 -> {error, {node_not_found, #{}}};
@@ -445,12 +443,12 @@ delete_or_fail(Path) ->
     end.
 
 put(PathPattern, Data) ->
-    khepri_machine:put(
-      ?STORE_ID, PathPattern, #kpayload_data{data = Data}).
+    khepri:put(
+      ?STORE_ID, PathPattern, Data).
 
 put(PathPattern, Data, Extra) ->
-    khepri_machine:put(
-      ?STORE_ID, PathPattern, #kpayload_data{data = Data}, Extra).
+    khepri:put(
+      ?STORE_ID, PathPattern, Data, Extra).
 
 transaction(Fun) ->
     transaction(Fun, auto).
