@@ -16,9 +16,8 @@
 
 all() ->
     [
-     {group, cluster_size_1_network},
-     {group, cluster_size_2_network},
-     {group, cluster_size_2_direct}
+     {group, mnesia_store},
+     {group, khepri_store}
     ].
 
 groups() ->
@@ -49,9 +48,16 @@ groups() ->
         cluster_multiple_users_zero_limit
     ],
     [
-      {cluster_size_1_network, [], ClusterSize1Tests},
-      {cluster_size_2_network, [], ClusterSize2Tests},
-      {cluster_size_2_direct,  [], ClusterSize2Tests}
+     {mnesia_store, [], [
+                         {cluster_size_1_network, [], ClusterSize1Tests},
+                         {cluster_size_2_network, [], ClusterSize2Tests},
+                         {cluster_size_2_direct,  [], ClusterSize2Tests}
+                        ]},
+     {khepri_store, [], [
+                         {cluster_size_1_network, [], ClusterSize1Tests},
+                         {cluster_size_2_network, [], ClusterSize2Tests},
+                         {cluster_size_2_direct,  [], ClusterSize2Tests}
+                        ]}
     ].
 
 suite() ->
@@ -71,6 +77,10 @@ init_per_suite(Config) ->
 end_per_suite(Config) ->
     rabbit_ct_helpers:run_teardown_steps(Config).
 
+init_per_group(mnesia_store, Config) ->
+    Config;
+init_per_group(khepri_store, Config) ->
+    rabbit_ct_helpers:set_config(Config, [{metadata_store, khepri}]);
 init_per_group(cluster_size_1_network, Config) ->
     Config1 = rabbit_ct_helpers:set_config(Config, [{connection_type, network}]),
     init_per_multinode_group(cluster_size_1_network, Config1, 1);
@@ -92,10 +102,7 @@ init_per_group(cluster_size_2_direct, Config) ->
         _ ->
             Config1 = rabbit_ct_helpers:set_config(Config, [{connection_type, direct}]),
             init_per_multinode_group(cluster_size_2_direct, Config1, 2)
-    end;
-
-init_per_group(cluster_rename, Config) ->
-    init_per_multinode_group(cluster_rename, Config, 2).
+    end.
 
 init_per_multinode_group(Group, Config, NodeCount) ->
     Suffix = rabbit_ct_helpers:testcase_absname(Config, "", "-"),
@@ -103,29 +110,23 @@ init_per_multinode_group(Group, Config, NodeCount) ->
                                                     {rmq_nodes_count, NodeCount},
                                                     {rmq_nodename_suffix, Suffix}
       ]),
-    case Group of
-        cluster_rename ->
-            % The broker is managed by {init,end}_per_testcase().
-            Config1;
-        _ ->
-            Config2 = rabbit_ct_helpers:run_steps(
-                        Config1, rabbit_ct_broker_helpers:setup_steps() ++
-                                 rabbit_ct_client_helpers:setup_steps()),
-            EnableFF = rabbit_ct_broker_helpers:enable_feature_flag(
-                         Config2, user_limits),
-            case EnableFF of
-                ok ->
-                    Config2;
-                {skip, _} = Skip ->
-                    end_per_group(Group, Config2),
-                    Skip;
-                Other ->
-                    end_per_group(Group, Config2),
-                    {skip, Other}
-            end
+    Config2 = rabbit_ct_helpers:run_steps(
+                Config1, rabbit_ct_broker_helpers:setup_steps() ++
+                    rabbit_ct_client_helpers:setup_steps()),
+    EnableFF = rabbit_ct_broker_helpers:enable_feature_flag(
+                 Config2, user_limits),
+    case EnableFF of
+        ok ->
+            Config2;
+        {skip, _} = Skip ->
+            end_per_group(Group, Config2),
+            Skip;
+        Other ->
+            end_per_group(Group, Config2),
+            {skip, Other}
     end.
 
-end_per_group(cluster_rename, Config) ->
+end_per_group(Group, Config) when Group == mnesia_store; Group == khepri_store ->
     % The broker is managed by {init,end}_per_testcase().
     Config;
 end_per_group(_Group, Config) ->
