@@ -89,9 +89,8 @@ init_per_group(mirrored_queue, Config) ->
 init_per_group(mnesia_store = Group, Config) ->
     init_per_group0(Group, Config);
 init_per_group(khepri_store = Group, Config0) ->
-    Config = init_per_group0(Group, Config0),
-    rabbit_ct_broker_helpers:enable_feature_flag(Config, raft_based_metadata_store_phase1),
-    Config.
+    Config = rabbit_ct_helpers:set_config(Config0, [{metadata_store, khepri}]),
+    init_per_group0(Group, Config).
 
 init_per_group0(Group, Config) ->
     case lists:member({group, Group}, all()) of

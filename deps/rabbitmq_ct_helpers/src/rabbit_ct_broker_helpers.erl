@@ -210,7 +210,8 @@ setup_steps() ->
                 fun rabbit_ct_helpers:ensure_rabbitmq_plugins_cmd/1,
                 fun set_lager_flood_limit/1,
                 fun start_rabbitmq_nodes/1,
-                fun share_dist_and_proxy_ports_map/1
+                fun share_dist_and_proxy_ports_map/1,
+                fun configure_metadata_store/1
             ];
         _ ->
             [
@@ -219,7 +220,8 @@ setup_steps() ->
                 fun rabbit_ct_helpers:ensure_rabbitmq_plugins_cmd/1,
                 fun set_lager_flood_limit/1,
                 fun start_rabbitmq_nodes/1,
-                fun share_dist_and_proxy_ports_map/1
+                fun share_dist_and_proxy_ports_map/1,
+                fun configure_metadata_store/1
             ]
     end.
 
@@ -918,6 +920,19 @@ share_dist_and_proxy_ports_map(Config) ->
     rpc_all(Config,
       application, set_env, [kernel, dist_and_proxy_ports_map, Map]),
     Config.
+
+configure_metadata_store(Config) ->
+    case ?config(metadata_store, NodeConfig) of
+        khepri ->
+            case enable_feature_flag(Config, raft_based_metadata_store_phase1) of
+                ok ->
+                    Config;
+                Skip ->
+                    Skip
+            end;
+        _ ->
+            Config
+    end.
 
 rewrite_node_config_file(Config, Node) ->
     NodeConfig = get_node_config(Config, Node),

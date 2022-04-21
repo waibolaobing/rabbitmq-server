@@ -51,19 +51,10 @@ end_per_suite(Config) ->
 init_per_group(mnesia_store = Group, Config) ->
     init_per_group_common(Group, Config, 2);
 init_per_group(khepri_store = Group, Config0) ->
-    Config = init_per_group_common(Group, Config0, 2),
-    enable_khepri(Group, Config);
+    Config = rabbit_ct_helpers:set_config(Config0, [{metadata_store, khepri}]),
+    init_per_group_common(Group, Config, 2);
 init_per_group(khepri_migration = Group, Config) ->
     init_per_group_common(Group, Config, 1).
-
-enable_khepri(Group, Config) ->
-    case rabbit_ct_broker_helpers:enable_feature_flag(Config, raft_based_metadata_store_phase1) of
-        ok ->
-            Config;
-        Skip ->
-            end_per_group(Group, Config),
-            Skip
-    end.
 
 init_per_group_common(Group, Config, Size) ->
     Config1 = rabbit_ct_helpers:set_config(Config,

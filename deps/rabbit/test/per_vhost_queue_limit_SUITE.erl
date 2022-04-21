@@ -75,30 +75,14 @@ init_per_suite(Config) ->
 end_per_suite(Config) ->
     rabbit_ct_helpers:run_teardown_steps(Config).
 
-init_per_group(Group, Config) when Group == mnesia_store; Group == khepri_store ->
-    %% Khepri must be enabled after the cluster is setup, the inner most group
-    %% must do it
+init_per_group(mnesia_store, Config) ->
     Config;
+init_per_group(khepri_store, Config) ->
+    rabbit_ct_helpers:set_config(Config, [{metadata_store, khepri}]);
 init_per_group(cluster_size_1 = Group, Config) ->
-    Config1 = init_per_multinode_group(cluster_size_1, Config, 1),
-    maybe_enable_khepri(Group, Config1);
+    init_per_multinode_group(Group, Config, 1);
 init_per_group(cluster_size_2 = Group, Config) ->
-    Config1 = init_per_multinode_group(cluster_size_2, Config, 2),
-    maybe_enable_khepri(Group, Config1).
-
-maybe_enable_khepri(Group, Config) ->
-    case ?config(tc_group_path, Config) of
-        [[{name, khepri_store}]] ->
-            case rabbit_ct_broker_helpers:enable_feature_flag(Config, raft_based_metadata_store_phase1) of
-                ok ->
-                    Config;
-                Skip ->
-                    end_per_group(Group, Config),
-                    Skip
-            end;
-        _ ->
-            Config
-    end.
+    init_per_multinode_group(Group, Config, 2).
 
 init_per_multinode_group(_Group, Config, NodeCount) ->
     Suffix = rabbit_ct_helpers:testcase_absname(Config, "", "-"),
