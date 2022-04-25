@@ -18,7 +18,7 @@
          route/2, delete/3, validate_binding/2, count/0]).
 -export([list_names/0, is_amq_prefixed/1]).
 %% these must be run inside a mnesia tx
--export([serial_in_mnesia/1, serial_in_khepri/1, peek_serial/1, update/2]).
+-export([serial_in_mnesia/1, peek_serial/1, update/2]).
 -export([maybe_auto_delete_in_mnesia/2, maybe_auto_delete_in_khepri/2]).
 -export([peek_serial_in_mnesia/1, peek_serial_in_khepri/1]).
 -export([mnesia_write_exchange_to_khepri/1, mnesia_write_durable_exchange_to_khepri/1,
@@ -28,7 +28,7 @@
 -export([list_in_mnesia/2, list_in_khepri_tx/1, update_in_mnesia/2, update_in_khepri/2]).
 -export([list_in_mnesia/1, list_in_khepri/0, store_in_khepri/1, list_durable_in_khepri/1,
          lookup_as_list_in_khepri/1, lookup_in_khepri_tx/1]).
-
+-export([prepare_next_serial_in_khepri_tx/1, next_serial_in_khepri_tx/1]).
 %%----------------------------------------------------------------------------
 
 -export_type([name/0, type/0]).
@@ -85,8 +85,7 @@ recover(VHost) ->
                    %% TODO do something with this callbacks. A single fun calling both?
                    %% Can we change the APIs?
                    [begin
-                        callback(X, create, transaction, [X]),
-                        callback(X, create, none, [X])
+                        callback(X, create, [transaction, none], [X])
                     end || X <- DurableExchanges],
                    DurableExchanges
            end),
@@ -95,13 +94,22 @@ recover(VHost) ->
 -spec callback
         (rabbit_types:exchange(), fun_name(), atom(), [any()]) -> 'ok'.
 
-callback(X = #exchange{type       = XType,
-                       decorators = Decorators}, Fun, Serial0, Args) ->
-    Serial = if is_function(Serial0) -> Serial0;
-                is_atom(Serial0)     -> fun (_Bool) -> Serial0 end
+callback(X = #exchange{type = XType,
+                       decorators = Decorators}, Fun, Serials, Args) when is_list(Serials) ->
+    Modules = rabbit_exchange_decorator:select(all, Decorators),
+    [callback0(X, Fun, Serial, Modules, Args) || Serial <- Serials],
+    ok;
+callback(X, Fun, Serial, Args) ->
+    callback(X, Fun, [Serial], Args).
+
+callback0(#exchange{type = XType} = X, Fun, Serial, Modules0, Args) when is_atom(Serial) ->
+    Modules = Modules0 ++ [type_to_module(XType)],
+    [ok = apply(M, Fun, [Serial | Args]) || M <- Modules];
+callback0(#exchange{type = XType} = X, Fun, Serial0, Modules, Args) ->
+    Serial = fun(true) -> Serial0;
+                (false) -> none
              end,
-    [ok = apply(M, Fun, [Serial(M:serialise_events(X)) | Args]) ||
-        M <- rabbit_exchange_decorator:select(all, Decorators)],
+    [ok = apply(M, Fun, [Serial(M:serialise_events(X)) | Args]) || M <- Modules],
     Module = type_to_module(XType),
     apply(Module, Fun, [Serial(Module:serialise_events()) | Args]).
 
@@ -123,23 +131,11 @@ serialise_events(X = #exchange{type = Type, decorators = Decorators}) ->
         orelse (type_to_module(Type)):serialise_events().
 
 -spec serial_in_mnesia(rabbit_types:exchange()) ->
-          fun((boolean()) -> 'none' | pos_integer()).
+          'none' | pos_integer().
 serial_in_mnesia(#exchange{name = XName} = X) ->
-    Serial = case serialise_events(X) of
-                 true  -> next_serial_in_mnesia(XName);
-                 false -> none
-             end,
-    fun (true)  -> Serial;
-        (false) -> none
-    end.
-
-serial_in_khepri(#exchange{name = XName} = X) ->
-    Serial = case serialise_events(X) of
-                 true  -> next_serial_in_khepri(XName);
-                 false -> none
-             end,
-    fun (true)  -> Serial;
-        (false) -> none
+    case serialise_events(X) of
+        true  -> next_serial_in_mnesia(XName);
+        false -> none
     end.
 
 -spec is_amq_prefixed(rabbit_types:exchange() | binary()) -> boolean().
@@ -211,8 +207,7 @@ declare(XName, Type, Durable, AutoDelete, Internal, Args, Username) ->
                                 end
                         end,
                         fun ({new, Exchange}) ->
-                                ok = callback(X, create, transaction, [Exchange]),
-                                ok = callback(X, create, none, [Exchange]),
+                                ok = callback(X, create, [transaction, none], [Exchange]),
                                 rabbit_event:notify(exchange_created, info(Exchange)),
                                 Exchange;
                             ({existing, Exchange}) ->
@@ -797,12 +792,17 @@ maybe_auto_delete_in_mnesia(#exchange{auto_delete = true} = X, OnlyDurable) ->
         {deleted, X, [], Deletions} -> {deleted, Deletions}
     end.
 
-maybe_auto_delete_in_khepri(#exchange{auto_delete = false}, _OnlyDurable) ->
-    not_deleted;
-maybe_auto_delete_in_khepri(#exchange{auto_delete = true} = X, OnlyDurable) ->
-    case conditional_delete_in_khepri(X, OnlyDurable) of
-        {error, in_use}             -> not_deleted;
-        {deleted, X, [], Deletions} -> {deleted, Deletions}
+maybe_auto_delete_in_khepri(XName, OnlyDurable) ->
+    case lookup_in_khepri_tx(XName) of
+        {error, not_found} ->
+            {not_deleted, undefined};
+        {ok, #exchange{auto_delete = false} = X} ->
+            {not_deleted, X};
+        {ok, #exchange{auto_delete = true} = X} ->
+            case conditional_delete_in_khepri(X, OnlyDurable) of
+                {error, in_use}             -> {not_deleted, X};
+                {deleted, X, [], Deletions} -> {deleted, X, Deletions}
+            end
     end.
 
 conditional_delete_in_mnesia(X = #exchange{name = XName}, OnlyDurable) ->
@@ -849,20 +849,27 @@ next_serial_in_mnesia(XName) ->
                       #exchange_serial{name = XName, next = Serial + 1}, write),
     Serial.
 
-next_serial_in_khepri(XName) ->
-    Path = khepri_exchange_serial_path(XName),
-    Extra = #{keep_while => #{khepri_exchange_path(XName) => #if_node_exists{exists = true}}},
-    rabbit_khepri:transaction(
-      fun() ->
-              Serial = case khepri_tx:get(Path) of
-                           {ok, #{Path := #{data := #exchange_serial{next = Serial0}}}} -> Serial0;
-                           _ -> 1
-                       end,
-              {ok, _} = khepri_tx:put(Path,
-                                      #exchange_serial{name = XName, next = Serial + 1},
-                                      Extra),
-              Serial
-      end, rw).
+prepare_next_serial_in_khepri_tx(#exchange{name = XName} = Src) ->
+    case serialise_events(Src) of
+        true ->
+            Path = khepri_exchange_serial_path(XName),
+            Extra = #{keep_while => #{khepri_exchange_path(XName) => #if_node_exists{exists = true}}},
+            #{path => Path, extra => Extra, xname => XName};
+        false ->
+            #{}
+    end.
+
+next_serial_in_khepri_tx(#{path := Path, extra := Extra, xname := XName}) ->
+    Serial = case khepri_tx:get(Path) of
+                 {ok, #{Path := #{data := #exchange_serial{next = Serial0}}}} -> Serial0;
+                 _ -> 1
+             end,
+    {ok, _} = khepri_tx:put(Path,
+                            #exchange_serial{name = XName, next = Serial + 1},
+                            Extra),
+    Serial;
+next_serial_in_khepri_tx(_) ->
+    none.
 
 -spec peek_serial(name()) -> pos_integer() | 'undefined'.
 
@@ -949,7 +956,7 @@ mnesia_write_durable_exchange_to_khepri(
     end.
 
 mnesia_write_exchange_serial_to_khepri(
-  #exchange{name = Resource} = Exchange) ->
+  #exchange_serial{name = Resource} = Exchange) ->
     Path = khepri_path:combine_with_conditions(khepri_exchange_serial_path(Resource),
                                                [#if_node_exists{exists = false}]),
     Extra = #{keep_while => #{khepri_exchange_path(Resource) => #if_node_exists{exists = true}}},

@@ -1900,7 +1900,7 @@ binding_action(Fun, SourceNameBin0, DestinationType, DestinationNameBin0,
     check_read_permitted(ExchangeName, User, AuthzContext),
     case rabbit_exchange:lookup(ExchangeName) of
         {error, not_found} ->
-            ok;
+            rabbit_amqqueue:not_found(ExchangeNameBin);
         {ok, Exchange}     ->
             check_read_permitted_on_topic(Exchange, User, RoutingKey, AuthzContext)
     end,
@@ -1908,13 +1908,7 @@ binding_action(Fun, SourceNameBin0, DestinationType, DestinationNameBin0,
                       destination = DestinationName,
                       key         = RoutingKey,
                       args        = Arguments},
-             fun (_X, Q) when ?is_amqqueue(Q) ->
-                     try rabbit_amqqueue:check_exclusive_access(Q, ConnPid)
-                     catch exit:Reason -> {error, Reason}
-                     end;
-                 (_X, #exchange{}) ->
-                     ok
-             end,
+             ConnPid,
              Username) of
         {error, {resources_missing, [{not_found, Name} | _]}} ->
             rabbit_amqqueue:not_found(Name);

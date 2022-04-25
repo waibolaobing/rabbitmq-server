@@ -176,11 +176,12 @@ recover_semi_durable_route_txn_in_mnesia(R = #route{binding = B}, X) ->
       end).
 
 recover_semi_durable_route_txn_in_khepri(Path, X) ->
+    NextSerial0 = rabbit_exchange:prepare_next_serial_in_khepri_tx(X),
     rabbit_khepri_misc:execute_khepri_transaction(
       fun () ->
               case khepri_tx:get(Path) of
                   {ok, #{Path := #{data := #{bindings := Set}}}} ->
-                      {rabbit_exchange:serial_in_khepri(X), Set};
+                      {rabbit_exchange:next_serial_in_khepri_tx(NextSerial0), Set};
                   _ ->
                       no_recover
               end
@@ -188,8 +189,7 @@ recover_semi_durable_route_txn_in_khepri(Path, X) ->
       fun (no_recover) -> ok;
           ({Serial, Set}) ->
               sets:fold(fun(B, none) ->
-                                x_callback(transaction, X, add_binding, B),
-                                x_callback(Serial, X, add_binding, B)
+                                x_callback([transaction, Serial], X, add_binding, B)
                         end, none, Set),
               ok
       end).
@@ -246,18 +246,11 @@ add(Binding, ActingUser) ->
 -spec add(rabbit_types:binding(), pid(), rabbit_types:username()) -> bind_res().
 
 add(Binding, ConnPid, ActingUser) ->
-    InnerFun = fun (_X, Q) when ?is_amqqueue(Q) ->
-                       try rabbit_amqqueue:check_exclusive_access(Q, ConnPid)
-                       catch exit:Reason -> {error, Reason}
-                       end;
-                   (_X, #exchange{}) ->
-                       ok
-               end,
     rabbit_khepri:try_mnesia_or_khepri(
-      fun() -> add_in_mnesia(Binding, InnerFun, ActingUser) end,
+      fun() -> add_in_mnesia(Binding, ConnPid, ActingUser) end,
       fun() -> add_in_khepri(Binding, ConnPid, ActingUser) end).
 
-add_in_mnesia(Binding, InnerFun, ActingUser) ->
+add_in_mnesia(Binding, ConnPid, ActingUser) ->
     binding_action_in_mnesia(
       Binding,
       fun (Src, Dst, B) ->
@@ -266,7 +259,7 @@ add_in_mnesia(Binding, InnerFun, ActingUser) ->
                       %% this argument is used to check queue exclusivity;
                       %% in general, we want to fail on that in preference to
                       %% anything else
-                      case InnerFun(Src, Dst) of
+                      case check_exclusive_access(Dst, ConnPid) of
                           ok ->
                               case mnesia:read({rabbit_route, B}) of
                                   []  -> add_in_mnesia(Src, Dst, B, ActingUser);
@@ -282,9 +275,9 @@ add_in_mnesia(Binding, InnerFun, ActingUser) ->
 
 add_in_khepri(#binding{source = SrcName,
                        destination = DstName} = Binding, ConnPid, ActingUser) ->
-    B = sort_args(Binding),
     case lookup_resources(SrcName, DstName) of
         {[Src], [Dst]} ->
+            B = sort_args(Binding),
             case rabbit_exchange:validate_binding(Src, B) of
                     ok ->
                     %% this argument is used to check queue exclusivity;
@@ -292,11 +285,8 @@ add_in_khepri(#binding{source = SrcName,
                     %% anything else
                     case check_exclusive_access(Dst, ConnPid) of
                         ok ->
-                            Type = binding_type(durable(Src), durable(Dst)),
-                            add_binding(B, Type),                              
-                            Serial = rabbit_exchange:serial_in_khepri(Src),
-                            x_callback(transaction, Src, add_binding, B),
-                            x_callback(Serial, Src, add_binding, B),
+                            Serial = add_binding_and_obtain_serial(B, Src, Dst),
+                            x_callback([transaction, Serial], Src, add_binding, B),
                             %% TODO should it be a trigger? maybe the full fun?
                             ok = rabbit_event:notify(
                                    binding_created,
@@ -311,6 +301,16 @@ add_in_khepri(#binding{source = SrcName,
         Errs ->
             not_found_or_absent_errs_in_khepri(not_found(Errs, SrcName, DstName))
     end.
+
+add_binding_and_obtain_serial(Binding, Src, Dst) ->
+    Type = binding_type(durable(Src), durable(Dst)),
+    Path = khepri_route_path(Binding),
+    NextSerial0 = rabbit_exchange:prepare_next_serial_in_khepri_tx(Src),
+    rabbit_khepri:transaction(
+      fun() ->
+              add_binding_tx(Path, Binding, Type),
+              rabbit_exchange:next_serial_in_khepri_tx(NextSerial0)
+      end, rw).
 
 check_exclusive_access(Q, ConnPid) when ?is_amqqueue(Q) ->
     try rabbit_amqqueue:check_exclusive_access(Q, ConnPid)
@@ -348,18 +348,11 @@ remove(Binding, ActingUser) -> remove(Binding, fun (_Src, _Dst) -> ok end, Actin
 
 -spec remove(rabbit_types:binding(), pid(), rabbit_types:username()) -> bind_res().
 remove(Binding, ConnPid, ActingUser) ->
-    InnerFun = fun (_X, Q) when ?is_amqqueue(Q) ->
-                       try rabbit_amqqueue:check_exclusive_access(Q, ConnPid)
-                       catch exit:Reason -> {error, Reason}
-                       end;
-                   (_X, #exchange{}) ->
-                       ok
-               end,
     rabbit_khepri:try_mnesia_or_khepri(
-      fun() -> remove_in_mnesia(Binding, InnerFun, ActingUser) end,
+      fun() -> remove_in_mnesia(Binding, ConnPid, ActingUser) end,
       fun() -> remove_in_khepri(Binding, ConnPid, ActingUser) end).
 
-remove_in_mnesia(Binding, InnerFun, ActingUser) ->
+remove_in_mnesia(Binding, ConnPid, ActingUser) ->
     binding_action_in_mnesia(
       Binding,
       fun (Src, Dst, B) ->
@@ -373,7 +366,7 @@ remove_in_mnesia(Binding, InnerFun, ActingUser) ->
                             %% a durable route in the database
                             _  -> remove_in_mnesia(Src, Dst, B, ActingUser)
                         end;
-                  _  -> case InnerFun(Src, Dst) of
+                  _  -> case check_exclusive_access(Dst, ConnPid) of
                             ok               -> remove_in_mnesia(Src, Dst, B, ActingUser);
                             {error, _} = Err -> rabbit_misc:const(Err)
                         end
@@ -395,7 +388,7 @@ remove_in_khepri(#binding{source = SrcName,
                                    case check_exclusive_access(Dst, ConnPid) of
                                        ok ->
                                            ok = delete_binding(B),
-                                           maybe_auto_delete_in_khepri(B#binding.source, [B], new_deletions(), false);
+                                           maybe_auto_delete_in_khepri(#binding.source, [B], new_deletions(), false);
                                        {error, _} = Err ->
                                            Err
                                    end
@@ -766,12 +759,15 @@ add_binding(Binding, BindingType) ->
     Path = khepri_route_path(Binding),
     rabbit_khepri:transaction(
       fun() ->
-              Data0 = #{bindings := Set} = bindings_data(Path, BindingType),
-              Data = Data0#{bindings => sets:add_element(Binding, Set)},
-              {ok, _} = khepri_tx:put(Path, Data),
-              add_routing(Binding),
-              ok
+              add_binding_tx(Path, Binding, BindingType)
       end, rw).
+
+add_binding_tx(Path, Binding, BindingType) ->
+    Data0 = #{bindings := Set} = bindings_data(Path, BindingType),
+    Data = Data0#{bindings => sets:add_element(Binding, Set)},
+    {ok, _} = khepri_tx:put(Path, Data),
+    add_routing(Binding),
+    ok.
 
 add_routing(#binding{destination = Dst} = Binding) ->
     Path = khepri_routing_path(Binding),
@@ -1005,15 +1001,12 @@ maybe_auto_delete_in_mnesia(XName, Bindings, Deletions, OnlyDurable) ->
 
 maybe_auto_delete_in_khepri(XName, Bindings, Deletions, OnlyDurable) ->
     {Entry, Deletions1} =
-        case rabbit_exchange:lookup_in_khepri_tx(XName) of
-            {error, not_found}  -> {{undefined, not_deleted, Bindings}, Deletions};
-            {ok, X} -> case rabbit_exchange:maybe_auto_delete_in_khepri(X, OnlyDurable) of
-                           not_deleted ->
-                               {{X, not_deleted, Bindings}, Deletions};
-                           {deleted, Deletions2} ->
-                               {{X, deleted, Bindings},
-                                combine_deletions(Deletions, Deletions2)}
-                       end
+        case rabbit_exchange:maybe_auto_delete_in_khepri(XName, OnlyDurable) of
+            {not_deleted, X} ->
+                {{X, not_deleted, Bindings}, Deletions};
+            {deleted, X, Deletions2} ->
+                {{X, deleted, Bindings},
+                 combine_deletions(Deletions, Deletions2)}
         end,
     add_deletion(XName, Entry, Deletions1).
 
@@ -1108,19 +1101,17 @@ process_deletions_in_khepri(Deletions, ActingUser) ->
     %% TODO store notifications as triggers for deletion of the path
     dict:fold(fun (XName, {X, deleted, Bindings}, ok) ->
                       Bs = lists:flatten(Bindings),
-                      x_callback(transaction, X, delete, Bs),
+                      x_callback([transaction, none], X, delete, Bs),
                       ok = rabbit_event:notify(
                              exchange_deleted,
                              [{name, XName},
                               {user_who_performed_action, ActingUser}]),
-                      del_notify(Bs, ActingUser),
-                      x_callback(none, X, delete, Bs);
+                      del_notify(Bs, ActingUser);
                   (_XName, {X, not_deleted, Bindings}, ok) ->
                       Bs = lists:flatten(Bindings),
-                      x_callback(transaction, X, remove_bindings, Bs),
-                      del_notify(Bs, ActingUser),
                       Serial = rabbit_exchange:serial_in_khepri(X),
-                      x_callback(Serial, X, remove_bindings, Bs)
+                      x_callback([transaction, Serial], X, remove_bindings, Bs),
+                      del_notify(Bs, ActingUser)
               end, ok, Deletions).
 
 del_notify(Bs, ActingUser) -> [rabbit_event:notify(
