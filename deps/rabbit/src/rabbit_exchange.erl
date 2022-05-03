@@ -6,7 +6,6 @@
 %%
 
 -module(rabbit_exchange).
--include_lib("khepri/include/khepri.hrl").
 -include_lib("rabbit_common/include/rabbit.hrl").
 -include_lib("rabbit_common/include/rabbit_framing.hrl").
 
@@ -17,18 +16,11 @@
          info_keys/0, info/1, info/2, info_all/1, info_all/2, info_all/4,
          route/2, delete/3, validate_binding/2, count/0]).
 -export([list_names/0, is_amq_prefixed/1]).
-%% these must be run inside a mnesia tx
--export([serial_in_mnesia/1, peek_serial/1, update/2]).
+-export([serialise_events/1]).
+%% these must be run inside a tx
+-export([serial/2, update/3, update/2]).
 -export([maybe_auto_delete_in_mnesia/2, maybe_auto_delete_in_khepri/2]).
--export([peek_serial_in_mnesia/1, peek_serial_in_khepri/1]).
--export([mnesia_write_exchange_to_khepri/1, mnesia_write_durable_exchange_to_khepri/1,
-         mnesia_write_exchange_serial_to_khepri/1,
-         clear_exchange_data_in_khepri/0, clear_durable_exchange_data_in_khepri/0,
-         clear_exchange_serial_data_in_khepri/0]).
--export([list_in_mnesia/2, list_in_khepri_tx/1, update_in_mnesia/2, update_in_khepri/2]).
--export([list_in_mnesia/1, list_in_khepri/0, store_in_khepri/1, list_durable_in_khepri/1,
-         lookup_as_list_in_khepri/1, lookup_in_khepri_tx/1]).
--export([prepare_next_serial_in_khepri_tx/1, next_serial_in_khepri_tx/1]).
+-export([peek_serial/2]).
 %%----------------------------------------------------------------------------
 
 -export_type([name/0, type/0]).
@@ -45,64 +37,20 @@
 -spec recover(rabbit_types:vhost()) -> [name()].
 
 recover(VHost) ->
-    Xs = rabbit_khepri:try_mnesia_or_khepri(
-           fun() -> rabbit_misc:table_filter(
-                      fun (#exchange{name = XName}) ->
-                              XName#resource.virtual_host =:= VHost andalso
-                                  mnesia:read({rabbit_exchange, XName}) =:= []
-                      end,
-                      fun (X, Tx) ->
-                              X1 = case Tx of
-                                       true  -> store_ram_in_mnesia(X);
-                                       false -> rabbit_exchange_decorator:set(X)
-                                   end,
-                              %% TODO how do we guarantee that lower down the callback
-                              %% we use the right transaction type? mnesia/khepri
-                              callback(X1, create, map_create_tx(Tx), [X1])
-                      end,
-                      rabbit_durable_exchange)
-           end,
-           fun() ->
-                   %% Khepri does not have ram tables, so data will not be lost
-                   %% once a node is restarted. Thus, a single table with
-                   %% idempotent recovery is enough. The exchange record already
-                   %% contains the durable flag and we use it to clean up or recover
-                   %% records.
-                   Path = khepri_exchanges_path() ++ [VHost, ?STAR_STAR],
-                   {ok, Map} = rabbit_khepri:match_and_get_data(Path),
-                   {DurableExchanges, TransientExchanges}
-                       = maps:fold(fun(_, #exchange{durable = true} = X, {DAcc, TAcc}) ->
-                                           {[rabbit_exchange_decorator:set(X) | DAcc], TAcc};
-                                      (_, #exchange{durable = false} = X, {DAcc, TAcc}) ->
-                                           {DAcc, [X | TAcc]}
-                                   end, {[], []}, Map),
-                   rabbit_khepri:transaction(
-                     fun() ->
-                             [_ = store_in_khepri(X) || X <- DurableExchanges],
-                             [_ = khepri_tx:delete(khepri_exchange_path(X#exchange.name))
-                              || X <- TransientExchanges]
-                     end),
-                   %% TODO do something with this callbacks. A single fun calling both?
-                   %% Can we change the APIs?
-                   [begin
-                        callback(X, create, [transaction, none], [X])
-                    end || X <- DurableExchanges],
-                   DurableExchanges
-           end),
+    Xs = rabbit_store:recover_exchanges(VHost),
     [XName || #exchange{name = XName} <- Xs].
 
 -spec callback
         (rabbit_types:exchange(), fun_name(), atom(), [any()]) -> 'ok'.
 
-callback(X = #exchange{type = XType,
-                       decorators = Decorators}, Fun, Serials, Args) when is_list(Serials) ->
+callback(X = #exchange{decorators = Decorators}, Fun, Serials, Args) when is_list(Serials) ->
     Modules = rabbit_exchange_decorator:select(all, Decorators),
     [callback0(X, Fun, Serial, Modules, Args) || Serial <- Serials],
     ok;
 callback(X, Fun, Serial, Args) ->
     callback(X, Fun, [Serial], Args).
 
-callback0(#exchange{type = XType} = X, Fun, Serial, Modules0, Args) when is_atom(Serial) ->
+callback0(#exchange{type = XType}, Fun, Serial, Modules0, Args) when is_atom(Serial) ->
     Modules = Modules0 ++ [type_to_module(XType)],
     [ok = apply(M, Fun, [Serial | Args]) || M <- Modules];
 callback0(#exchange{type = XType} = X, Fun, Serial0, Modules, Args) ->
@@ -130,13 +78,14 @@ serialise_events(X = #exchange{type = Type, decorators = Decorators}) ->
               rabbit_exchange_decorator:select(all, Decorators))
         orelse (type_to_module(Type)):serialise_events().
 
--spec serial_in_mnesia(rabbit_types:exchange()) ->
+-spec serial(rabbit_types:exchange(), 'mnesia' | 'khepri') ->
           'none' | pos_integer().
-serial_in_mnesia(#exchange{name = XName} = X) ->
-    case serialise_events(X) of
-        true  -> next_serial_in_mnesia(XName);
-        false -> none
-    end.
+serial(X, Store) ->
+    rabbit_store:next_exchange_serial(X, Store).
+
+-spec peek_serial(name(), mnesia | khepri) -> pos_integer() | 'undefined'.
+peek_serial(XName, Store) ->
+    rabbit_store:peek_exchange_serial(XName, read, Store).
 
 -spec is_amq_prefixed(rabbit_types:exchange() | binary()) -> boolean().
 
@@ -175,47 +124,26 @@ declare(XName, Type, Durable, AutoDelete, Internal, Args, Username) ->
                                           ?EXCHANGE_DELETE_IN_PROGRESS_COMPONENT,
                                           XName#resource.name) of
         not_found ->
-            rabbit_khepri:try_mnesia_or_khepri(
-              fun() ->
-                      rabbit_misc:execute_mnesia_transaction(
-                        fun () ->
-                                case mnesia:wread({rabbit_exchange, XName}) of
-                                    [] ->
-                                        {new, store_in_mnesia(X)};
-                                    [ExistingX] ->
-                                        {existing, ExistingX}
-                                end
-                        end,
-                        fun ({new, Exchange}, Tx) ->
-                                ok = callback(X, create, map_create_tx(Tx), [Exchange]),
-                                rabbit_event:notify_if(not Tx, exchange_created, info(Exchange)),
-                                Exchange;
-                            ({existing, Exchange}, _Tx) ->
-                                Exchange;
-                            (Err, _Tx) ->
-                                Err
-                        end)
-              end,
-              fun() ->
-                      rabbit_khepri_misc:execute_khepri_transaction(
-                        fun() ->
-                                case lookup_as_list_in_khepri(XName) of
-                                    [] ->
-                                        {new, store_in_khepri(X)};
-                                    [ExistingX] ->
-                                        {existing, ExistingX}
-                                end
-                        end,
-                        fun ({new, Exchange}) ->
-                                ok = callback(X, create, [transaction, none], [Exchange]),
-                                rabbit_event:notify(exchange_created, info(Exchange)),
-                                Exchange;
-                            ({existing, Exchange}) ->
-                                Exchange;
-                            (Err) ->
-                                Err
-                        end)
-              end);
+            PrePostCommitFun =
+                fun ({new, Exchange} = Response, all) ->
+                        %% Khepri can't run this inside of a transaction, support both
+                        %% transactional and non-transactional ops at once. If
+                        %% exchange decorators need a transaction, they must run their own
+                        ok = callback(X, create, [transaction, none], [Exchange]),
+                        rabbit_event:notify(exchange_created, info(Exchange)),
+                        Response;
+                    ({new, Exchange} = Response, Tx) ->
+                        ok = callback(X, create, map_create_tx(Tx), [Exchange]),
+                        rabbit_event:notify_if(not Tx, exchange_created, info(Exchange)),
+                        Response;
+                    (Response, _Tx) ->
+                        Response
+                end,
+            case rabbit_store:create_exchange(X, PrePostCommitFun) of
+                {new, Exchange} -> Exchange;
+                {existing, Exchange} -> Exchange;
+                Err -> Err
+            end;
         _ ->
             rabbit_log:warning("ignoring exchange.declare for exchange ~p,
                                 exchange.delete in progress~n.", [XName]),
@@ -224,24 +152,6 @@ declare(XName, Type, Durable, AutoDelete, Internal, Args, Username) ->
 
 map_create_tx(true)  -> transaction;
 map_create_tx(false) -> none.
-
-
-store_in_mnesia(X = #exchange{durable = true}) ->
-    mnesia:write(rabbit_durable_exchange, X#exchange{decorators = undefined},
-                 write),
-    store_ram_in_mnesia(X);
-store_in_mnesia(X = #exchange{durable = false}) ->
-    store_ram_in_mnesia(X).
-
-store_ram_in_mnesia(X) ->
-    X1 = rabbit_exchange_decorator:set(X),
-    ok = mnesia:write(rabbit_exchange, X1, write),
-    X1.
-
-store_in_khepri(X) ->
-    Path = khepri_exchange_path(X#exchange.name),
-    {ok, _} = khepri_tx:put(Path, X),
-    X.
 
 %% Used with binaries sent over the wire; the type may not exist.
 
@@ -297,33 +207,7 @@ assert_args_equivalence(#exchange{ name = Name, arguments = Args },
                     rabbit_types:error('not_found').
 
 lookup(Name) ->
-    rabbit_khepri:try_mnesia_or_khepri(
-      fun() -> lookup_in_mnesia(Name) end,
-      fun() -> lookup_in_khepri(Name) end).
-
-lookup_in_mnesia(Name) ->
-    rabbit_misc:dirty_read({rabbit_exchange, Name}).
-
-lookup_in_khepri(Name) ->
-    Path = khepri_exchange_path(Name),
-    case rabbit_khepri:get_data(Path) of
-        {ok, X} -> {ok, X};
-        _ -> {error, not_found}
-    end.
-
-lookup_in_khepri_tx(Name) ->
-    Path = khepri_exchange_path(Name),
-    case khepri_tx:get(Path) of
-        {ok, #{Path := #{data := X}}} -> {ok, X};
-        _ -> {error, not_found}
-    end.
-
-lookup_as_list_in_khepri(Name) ->
-    Path = khepri_exchange_path(Name),
-    case khepri_tx:get(Path) of
-        {ok, #{Path := #{data := X}}} -> [X];
-        _ -> []
-    end.
+    rabbit_store:lookup_exchange(Name).
 
 -spec lookup_many([name()]) -> [rabbit_types:exchange()].
 
@@ -331,23 +215,7 @@ lookup_as_list_in_khepri(Name) ->
 lookup_many([]) ->
     [];
 lookup_many(Names) ->
-    rabbit_khepri:try_mnesia_or_khepri(
-      fun() -> lookup_many_in_mnesia(Names) end,
-      fun() -> lookup_many_in_khepri(Names) end).
-
-lookup_many_in_mnesia([Name]) -> ets:lookup(rabbit_exchange, Name);
-lookup_many_in_mnesia(Names) when is_list(Names) ->
-    %% Normally we'd call mnesia:dirty_read/1 here, but that is quite
-    %% expensive for reasons explained in rabbit_misc:dirty_read/1.
-    lists:append([ets:lookup(rabbit_exchange, Name) || Name <- Names]).
-
-lookup_many_in_khepri(Names) when is_list(Names) ->
-    lists:foldl(fun(Name, Acc) ->
-                        case lookup_in_khepri(Name) of
-                            {ok, X} -> [X | Acc];
-                            _ -> Acc
-                        end
-                end, [], Names).
+    rabbit_store:lookup_many_exchanges(Names).
 
 -spec lookup_or_die
         (name()) -> rabbit_types:exchange() |
@@ -362,93 +230,22 @@ lookup_or_die(Name) ->
 -spec list() -> [rabbit_types:exchange()].
 
 list() ->
-    rabbit_khepri:try_mnesia_or_khepri(
-      fun() -> list_in_mnesia(rabbit_exchange) end,
-      fun() -> list_in_khepri() end).
-
-list_in_mnesia(Table) ->
-    mnesia:dirty_match_object(Table, #exchange{_ = '_'}).
-
-list_in_khepri() ->
-    Path = khepri_exchanges_path() ++ [?STAR_STAR],
-    case rabbit_khepri:match_and_get_data(Path) of
-        {ok, Exchanges} -> maps:values(Exchanges);
-        _            -> []
-    end.
+    rabbit_store:list_exchanges().
 
 -spec count() -> non_neg_integer().
 
 count() ->
-    rabbit_khepri:try_mnesia_or_khepri(
-      fun() -> count_in_mnesia() end,
-      fun() -> count_in_khepri() end).
-
-count_in_mnesia() ->
-    mnesia:table_info(rabbit_exchange, size).
-
-count_in_khepri() ->
-    Path = khepri_exchanges_path() ++ [?STAR_STAR],
-    case rabbit_khepri:match(Path) of
-        {ok, Xs} -> maps:size(Xs);
-        _            -> 0
-    end.
+    rabbit_store:count_exchanges().
 
 -spec list_names() -> [rabbit_exchange:name()].
 
 list_names() ->
-    rabbit_khepri:try_mnesia_or_khepri(
-      fun() -> list_names_in_mnesia() end,
-      fun() -> list_names_in_khepri() end).
-
-list_names_in_mnesia() ->
-    mnesia:dirty_all_keys(rabbit_exchange).
-
-list_names_in_khepri() ->
-    Path = khepri_exchanges_path() ++ [?STAR_STAR],
-    case rabbit_khepri:match_and_get_data(Path) of
-        {ok, Map} -> maps:keys(Map);
-        _            -> []
-    end.
-
-%% Not dirty_match_object since that would not be transactional when used in a
-%% tx context
+    rabbit_store:list_exchange_names().
 
 -spec list(rabbit_types:vhost()) -> [rabbit_types:exchange()].
 
 list(VHostPath) ->
-    rabbit_khepri:try_mnesia_or_khepri(
-      fun() ->
-              list_in_mnesia(rabbit_exchange, VHostPath)
-      end,
-      fun() ->
-              list_in_khepri(VHostPath)
-      end).
-
-list_in_mnesia(Table, VHostPath) ->
-    mnesia:async_dirty(
-      fun () ->
-              mnesia:match_object(
-                Table,
-                #exchange{name = rabbit_misc:r(VHostPath, exchange), _ = '_'},
-                read)
-      end).
-
-list_durable_in_khepri(VHostPath) ->
-    list_in_khepri(VHostPath, true).
-
-list_in_khepri(VHostPath) ->
-    list_in_khepri(VHostPath, '_').
-
-list_in_khepri(VHostPath, Durable) ->
-    Pattern = #if_data_matches{pattern = #exchange{durable = Durable, _ = '_'}},
-    Path = khepri_exchanges_path() ++ [VHostPath, Pattern],
-    {ok, Map} = rabbit_khepri:match_and_get_data(Path),
-    maps:values(Map).
-
-list_in_khepri_tx(VHostPath) ->
-    Path = khepri_exchanges_path() ++ [VHostPath, ?STAR_STAR],
-    {ok, Map} = rabbit_khepri:tx_match_and_get_data(Path),
-    maps:values(Map).
+    rabbit_store:list_exchanges(VHostPath).
 
 -spec lookup_scratch(name(), atom()) ->
                                rabbit_types:ok(term()) |
@@ -470,29 +267,11 @@ lookup_scratch(Name, App) ->
 -spec update_scratch(name(), atom(), fun((any()) -> any())) -> 'ok'.
 
 update_scratch(Name, App, Fun) ->
-    Decorators = rabbit_exchange_decorator:list(),
-    rabbit_khepri:try_mnesia_or_khepri(
-      fun () ->
-              rabbit_misc:execute_mnesia_transaction(
-                fun() ->
-                        update_in_mnesia(Name, update_scratch(App, Fun, [])),
-                        ok
-                end)
-      end,
-      fun() ->
-              Path = khepri_exchange_path(Name),
-              Decorators = case rabbit_khepri:get(Path) of
-                               {ok, #{Path := #{data := X}}} ->
-                                   rabbit_exchange_decorator:active(X);
-                               _ ->
-                                   []
-                           end,
-              rabbit_khepri:transaction(
-                fun() ->
-                        update_in_khepri(Name, update_scratch_fun(App, Fun, Decorators)),
-                        ok
-                end, rw)
-      end).
+    Decorators = case rabbit_store:lookup_exchange(Name) of
+                     {ok, X} -> rabbit_exchange_decorator:active(X);
+                     {error, not_found} -> []
+                 end,
+    rabbit_store:update_exchange_scratch(Name, update_scratch_fun(App, Fun, Decorators)).
 
 update_scratch_fun(App, Fun, Decorators) ->
     fun(X = #exchange{scratches = Scratches0}) ->
@@ -512,61 +291,18 @@ update_scratch_fun(App, Fun, Decorators) ->
 -spec update_decorators(name()) -> 'ok'.
 
 update_decorators(Name) ->
-    rabbit_khepri:try_mnesia_or_khepri(
-      fun() -> update_decorators_in_mnesia(Name) end,
-      fun() -> update_decorators_in_khepri(Name) end).
-
-update_decorators_in_mnesia(Name) ->
-    rabbit_misc:execute_mnesia_transaction(
-      fun() ->
-              case mnesia:wread({rabbit_exchange, Name}) of
-                  [X] -> store_ram_in_mnesia(X),
-                         ok;
-                  []  -> ok
-              end
-      end).
-
-update_decorators_in_khepri(#resource{virtual_host = VHost, name = Name} = XName) ->
-    Path = khepri_exchange_path(XName),
-    rabbit_kepri_misc:retry(
-      fun () -> update_decorators_in_khepri(Path, VHost, Name) end).
-
-update_decorators_in_khepri(Path, VHost, Name) ->
-    case rabbit_khepri:get(Path) of
-        {ok, #{Path := #{data := X, payload_version := Vsn}}} ->
-            X1 = rabbit_exchange_decorator:set(X),
-            Conditions = #if_all{conditions = [Name, #if_payload_version{version = Vsn}]},
-            UpdatePath = khepri_exchanges_path() ++ [VHost, Conditions],
-            rabbit_khepri:put(UpdatePath, X1);
-        _ ->
-            ok
-    end.
+    rabbit_store:update_exchange_decorators(Name).
 
 -spec update
         (name(),
          fun((rabbit_types:exchange()) -> rabbit_types:exchange()))
          -> not_found | rabbit_types:exchange().
 
-update(Name, Fun) ->
-    %% TODO is this called from anywhere else? The double check of `rabbit_khepri:try...`
-    %% will have issues when compiling the transaction
-    rabbit_khepri:try_mnesia_or_khepri(
-      fun() -> update_in_mnesia(Name, Fun) end,
-      fun() -> update_in_khepri(Name, Fun) end).
+update(Name, Fun, Store) ->
+    rabbit_store:update_exchange(Name, Fun, Store).
 
-update_in_mnesia(Name, Fun) ->
-    case mnesia:wread({rabbit_exchange, Name}) of
-        [X] -> X1 = Fun(X),
-               store_in_mnesia(X1);
-        []  -> not_found
-    end.
-
-update_in_khepri(Name, Fun) ->
-    case lookup_as_list_in_khepri(Name) of
-        [X] -> X1 = Fun(X),
-               store_in_khepri(X1);
-        []  -> not_found
-    end.
+update(X, Store) ->
+    rabbit_store:update_exchange(X, Store).
 
 -spec immutable(rabbit_types:exchange()) -> rabbit_types:exchange().
 
@@ -702,14 +438,6 @@ cons_if_present(XName, L) ->
         {error, not_found} -> L
     end.
 
-call_with_exchange_in_mnesia(XName, Fun) ->
-    rabbit_misc:execute_mnesia_tx_with_tail(
-      fun () -> case mnesia:read({rabbit_exchange, XName}) of
-                    []  -> rabbit_misc:const({error, not_found});
-                    [X] -> Fun(X)
-                end
-      end).
-
 -spec delete
         (name(),  'true', rabbit_types:username()) ->
                     'ok'| rabbit_types:error('not_found' | 'in_use');
@@ -717,14 +445,10 @@ call_with_exchange_in_mnesia(XName, Fun) ->
                     'ok' | rabbit_types:error('not_found').
 
 delete(XName, IfUnused, Username) ->
-    MnesiaFun = case IfUnused of
-                    true  -> fun conditional_delete_in_mnesia/2;
-                    false -> fun unconditional_delete_in_mnesia/2
-                end,
-    KhepriFun = case IfUnused of
-                    true  -> fun conditional_delete_in_khepri/2;
-                    false -> fun unconditional_delete_in_khepri/2
-                end,
+    Fun = case IfUnused of
+              true  -> fun conditional_delete/1;
+              false -> fun unconditional_delete/1
+          end,
     try
         %% guard exchange.declare operations from failing when there's
         %% a race condition between it and an exchange.delete.
@@ -733,44 +457,22 @@ delete(XName, IfUnused, Username) ->
         rabbit_runtime_parameters:set(XName#resource.virtual_host,
                                       ?EXCHANGE_DELETE_IN_PROGRESS_COMPONENT,
                                       XName#resource.name, true, Username),
-        rabbit_khepri:try_mnesia_or_khepri(
-          fun() ->
-                  call_with_exchange_in_mnesia(
-                    XName,
-                    fun (X) ->
-                            case MnesiaFun(X, false) of
-                                {deleted, X, Bs, Deletions} ->
-                                    rabbit_binding:process_deletions(
-                                      rabbit_binding:add_deletion(
-                                        XName, {X, deleted, Bs}, Deletions), Username);
-                                {error, _InUseOrNotFound} = E ->
-                                    rabbit_misc:const(E)
-                            end
-                    end)
-          end,
-          fun() ->
-                  case rabbit_khepri:transaction(
-                         fun() ->
-                                 case lookup_as_list_in_khepri(XName) of
-                                     [] -> {error, not_found};
-                                     [X] -> KhepriFun(X, false)
-                                 end
-                         end, rw) of
-                      {error, _} = E ->
-                          E;
-                      {deleted, X, Bs, Deletions} ->
-                          %% TODO this bindings might notify things? review!
-                          %% TODO process_deletions should happen outside the transaction
-                          rabbit_binding:process_deletions_in_khepri(
-                            rabbit_binding:add_deletion(
-                              XName, {X, deleted, Bs}, Deletions), Username)
-                  end
-          end)
+        Deletions = rabbit_store:delete_exchange(XName, Fun, fun process_deletions/2),
+        rabbit_binding:notify_deletions(Deletions, Username)
     after
         rabbit_runtime_parameters:clear(XName#resource.virtual_host,
                                         ?EXCHANGE_DELETE_IN_PROGRESS_COMPONENT,
                                         XName#resource.name, Username)
     end.
+
+process_deletions({error, _} = E, _IsTransaction) ->
+    E;
+process_deletions({deleted, #exchange{name = XName} = X, Bs, Deletions}, IsTransaction) ->
+    rabbit_binding:process_deletions(
+      rabbit_binding:add_deletion(
+        XName, {X, deleted, Bs}, Deletions), IsTransaction);
+process_deletions(Deletions, IsTransaction) ->
+    rabbit_binding:process_deletions(Deletions, IsTransaction).
 
 -spec validate_binding
         (rabbit_types:exchange(), rabbit_types:binding())
@@ -784,6 +486,7 @@ validate_binding(X = #exchange{type = XType}, Binding) ->
         (rabbit_types:exchange(), boolean())
         -> 'not_deleted' | {'deleted', rabbit_binding:deletions()}.
 
+%% TODO migrate with rabbit_binding
 maybe_auto_delete_in_mnesia(#exchange{auto_delete = false}, _OnlyDurable) ->
     not_deleted;
 maybe_auto_delete_in_mnesia(#exchange{auto_delete = true} = X, OnlyDurable) ->
@@ -793,105 +496,45 @@ maybe_auto_delete_in_mnesia(#exchange{auto_delete = true} = X, OnlyDurable) ->
     end.
 
 maybe_auto_delete_in_khepri(XName, OnlyDurable) ->
-    case lookup_in_khepri_tx(XName) of
-        {error, not_found} ->
+    case rabbit_store:lookup_exchange_tx(XName, khepri) of
+        [] ->
             {not_deleted, undefined};
-        {ok, #exchange{auto_delete = false} = X} ->
+        [#exchange{auto_delete = false} = X] ->
             {not_deleted, X};
-        {ok, #exchange{auto_delete = true} = X} ->
+        [#exchange{auto_delete = true} = X] ->
             case conditional_delete_in_khepri(X, OnlyDurable) of
                 {error, in_use}             -> {not_deleted, X};
                 {deleted, X, [], Deletions} -> {deleted, X, Deletions}
             end
     end.
 
+conditional_delete(mnesia) ->
+    fun conditional_delete_in_mnesia/2;
+conditional_delete(khepri) ->
+    fun conditional_delete_in_khepri/2.
+
 conditional_delete_in_mnesia(X = #exchange{name = XName}, OnlyDurable) ->
     case rabbit_binding:has_for_source_in_mnesia(XName) of
-        false  -> internal_delete_in_mnesia(X, OnlyDurable, false);
+        false  -> rabbit_store:delete_exchange_in_mnesia(X, OnlyDurable, false);
         true   -> {error, in_use}
     end.
 
 conditional_delete_in_khepri(X = #exchange{name = XName}, OnlyDurable) ->
     case rabbit_binding:has_for_source_in_khepri(XName) of
-        false  -> internal_delete_in_khepri(X, OnlyDurable, false);
+        false  -> rabbit_store:delete_exchange_in_khepri(X, OnlyDurable, false);
         true   -> {error, in_use}
     end.
 
+unconditional_delete(mnesia) ->
+    fun unconditional_delete_in_mnesia/2;
+unconditional_delete(khepri) ->
+    fun unconditional_delete_in_khepri/2.
+
 unconditional_delete_in_mnesia(X, OnlyDurable) ->
-    internal_delete_in_mnesia(X, OnlyDurable, true).
+    rabbit_store:delete_exchange_in_mnesia(X, OnlyDurable, true).
 
 unconditional_delete_in_khepri(X, OnlyDurable) ->
-    internal_delete_in_khepri(X, OnlyDurable, true).
-
-internal_delete_in_mnesia(X = #exchange{name = XName}, OnlyDurable, RemoveBindingsForSource) ->
-    ok = mnesia:delete({rabbit_exchange, XName}),
-    mnesia:delete({rabbit_durable_exchange, XName}),
-    Bindings = case RemoveBindingsForSource of
-        true  -> rabbit_binding:remove_for_source_in_mnesia(XName);
-        false -> []
-    end,
-    {deleted, X, Bindings, rabbit_binding:remove_for_destination_in_mnesia(
-                             XName, OnlyDurable)}.
-
-internal_delete_in_khepri(X = #exchange{name = XName}, OnlyDurable, RemoveBindingsForSource) ->
-    {ok, _} = khepri_tx:delete(khepri_exchange_path(XName)),
-    %% TODO bindings...
-    Bindings = case RemoveBindingsForSource of
-        true  -> rabbit_binding:remove_for_source_in_khepri(XName);
-        false -> []
-    end,
-    {deleted, X, Bindings, rabbit_binding:remove_for_destination_in_khepri(
-                             XName, OnlyDurable)}.
-
-next_serial_in_mnesia(XName) ->
-    Serial = peek_serial_in_mnesia(XName, write),
-    ok = mnesia:write(rabbit_exchange_serial,
-                      #exchange_serial{name = XName, next = Serial + 1}, write),
-    Serial.
-
-prepare_next_serial_in_khepri_tx(#exchange{name = XName} = Src) ->
-    case serialise_events(Src) of
-        true ->
-            Path = khepri_exchange_serial_path(XName),
-            Extra = #{keep_while => #{khepri_exchange_path(XName) => #if_node_exists{exists = true}}},
-            #{path => Path, extra => Extra, xname => XName};
-        false ->
-            #{}
-    end.
-
-next_serial_in_khepri_tx(#{path := Path, extra := Extra, xname := XName}) ->
-    Serial = case khepri_tx:get(Path) of
-                 {ok, #{Path := #{data := #exchange_serial{next = Serial0}}}} -> Serial0;
-                 _ -> 1
-             end,
-    {ok, _} = khepri_tx:put(Path,
-                            #exchange_serial{name = XName, next = Serial + 1},
-                            Extra),
-    Serial;
-next_serial_in_khepri_tx(_) ->
-    none.
-
--spec peek_serial(name()) -> pos_integer() | 'undefined'.
-
-peek_serial(XName) -> peek_serial_in_mnesia(XName).
-
-peek_serial_in_mnesia(XName) -> peek_serial_in_mnesia(XName, read).
-peek_serial_in_khepri(XName) -> peek_serial_in_khepri(XName, read).
-
-peek_serial_in_mnesia(XName, LockType) ->
-    case mnesia:read(rabbit_exchange_serial, XName, LockType) of
-        [#exchange_serial{next = Serial}]  -> Serial;
-        _                                  -> 1
-    end.
-
-peek_serial_in_khepri(XName, _LockType) ->
-    Path = khepri_exchange_serial_path(XName),
-    case khepri_tx:get(Path) of
-        {ok, #{Path := #{data := #exchange_serial{next = Serial}}}} ->
-            Serial;
-        _ ->
-            1
-    end.
+    rabbit_store:delete_exchange_in_khepri(X, OnlyDurable, true).
 
 invalid_module(T) ->
     rabbit_log:warning("Could not find exchange type ~s.", [T]),
@@ -909,76 +552,4 @@ type_to_module(T) ->
             end;
         Module ->
             Module
-    end.
-
-khepri_exchanges_path() ->
-    [?MODULE, exchanges].
-
-khepri_exchange_path(#resource{virtual_host = VHost, name = Name}) ->
-    [?MODULE, exchanges, VHost, Name].
-
-khepri_exchange_serials_path() ->
-    [?MODULE, exchanges_serials].
-
-khepri_exchange_serial_path(#resource{virtual_host = VHost, name = Name}) ->
-    [?MODULE, exchange_serials, VHost, Name].
-
-%% Mnesia contains two tables if an exchange has been recovered:
-%% rabbit_exchange (ram) and rabbit_durable_exchange (disc).
-%% As all data in Khepri is persistent, there is no point on
-%% having ram and data entries. We use the 'persistent' flag on
-%% the record to select the exchanges to be recovered or deleted
-%% on start-up. Any other query can use this flag to select
-%% the exchange type needed.
-%% How do we then transform data from mnesia to khepri when
-%% the feature flag is enabled?
-%% Let's create the Khepri entry if it does not already exist.
-%% If ram table is migrated first, the record will be moved as is.
-%% If the disc table is migrated first, the record is updated with
-%% the exchange decorators.
-mnesia_write_exchange_to_khepri(
-  #exchange{name = Resource} = Exchange) ->
-    Path = khepri_exchange_path(Resource),
-    case rabbit_khepri:create(Path, Exchange) of
-        {ok, _} -> ok;
-        {error, {mismatching_node, _}} -> ok;
-        Error -> throw(Error)
-    end.
-
-mnesia_write_durable_exchange_to_khepri(
-  #exchange{name = Resource} = Exchange0) ->
-    Path = khepri_exchange_path(Resource),
-    Exchange = rabbit_exchange_decorator:set(Exchange0),
-    case rabbit_khepri:create(Path, Exchange) of
-        {ok, _} -> ok;
-        {error, {mismatching_node, _}} -> ok;
-        Error -> throw(Error)
-    end.
-
-mnesia_write_exchange_serial_to_khepri(
-  #exchange_serial{name = Resource} = Exchange) ->
-    Path = khepri_path:combine_with_conditions(khepri_exchange_serial_path(Resource),
-                                               [#if_node_exists{exists = false}]),
-    Extra = #{keep_while => #{khepri_exchange_path(Resource) => #if_node_exists{exists = true}}},
-    case rabbit_khepri:put(Path, Exchange, Extra) of
-        {ok, _} -> ok;
-        Error -> throw(Error)
-    end.
-
-%% There is a single khepri entry for exchanges. Clear it anyway.
-clear_exchange_data_in_khepri() ->
-    clear_durable_exchange_data_in_khepri().
-
-clear_durable_exchange_data_in_khepri() ->
-    Path = khepri_exchanges_path(),
-    case rabbit_khepri:delete(Path) of
-        {ok, _} -> ok;
-        Error -> throw(Error)
-    end.
-
-clear_exchange_serial_data_in_khepri() ->
-    Path = khepri_exchange_serials_path(),
-    case rabbit_khepri:delete(Path) of
-        {ok, _} -> ok;
-        Error -> throw(Error)
     end.

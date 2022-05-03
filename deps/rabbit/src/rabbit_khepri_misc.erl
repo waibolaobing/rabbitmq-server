@@ -11,7 +11,6 @@
 
 -export([execute_khepri_transaction/2]).
 -export([execute_khepri_tx_with_tail/1]).
--export([table_filter_in_khepri/3]).
 -export([retry/1]).
 
 -define(WAIT_SECONDS, 30).
@@ -21,37 +20,6 @@ execute_khepri_tx_with_tail(TxFun) ->
         true  -> rabbit_khepri:transaction(TxFun, rw);
         false -> TailFun = rabbit_khepri:transaction(TxFun, rw),
                  TailFun()
-    end.
-
-%% TODO should rabbit table have a conversion of mnesia_table -> khepri_path?
-table_filter_in_khepri(Pred, PreCommitFun, Path) ->
-    case khepri_tx:is_transaction() of
-        true  -> throw(unexpected_transaction);
-        false -> ok
-    end,
-    rabbit_khepri:transaction(
-      fun () ->
-              khepri_filter(Path, Pred, PreCommitFun)
-      end, rw).
-
-khepri_filter(Path, Pred, PreCommitFun) ->
-    case khepri_tx:list(Path) of
-        {ok, Map} ->
-            maps:fold(
-              fun
-                  (P, #{data := Data}, Acc) when P =:= Path ->
-                      case Pred(Data) of
-                          true ->
-                              PreCommitFun(Data),
-                              [Data | Acc];
-                          false ->
-                              Acc
-                      end;
-                  (_, _, Acc) ->
-                      Acc
-              end, [], Map);
-        _ ->
-            []
     end.
 
 execute_khepri_transaction(TxFun, PostCommitFun) ->

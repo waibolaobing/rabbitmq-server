@@ -512,15 +512,15 @@ clear_data_from_previous_attempt(
     clear_data_from_previous_attempt(FeatureName, Rest);
 clear_data_from_previous_attempt(
   FeatureName, [rabbit_exchange | Rest]) ->
-    ok = rabbit_exchange:clear_exchange_data_in_khepri(),
+    ok = rabbit_store:clear_exchange_data_in_khepri(),
     clear_data_from_previous_attempt(FeatureName, Rest);
 clear_data_from_previous_attempt(
   FeatureName, [rabbit_durable_exchange | Rest]) ->
-    ok = rabbit_exchange:clear_durable_exchange_data_in_khepri(),
+    ok = rabbit_store:clear_durable_exchange_data_in_khepri(),
     clear_data_from_previous_attempt(FeatureName, Rest);
 clear_data_from_previous_attempt(
   FeatureName, [rabbit_exchange_serial | Rest]) ->
-    ok = rabbit_exchange:clear_exchange_serial_data_in_khepri(),
+    ok = rabbit_store:clear_exchange_serial_data_in_khepri(),
     clear_data_from_previous_attempt(FeatureName, Rest);
 clear_data_from_previous_attempt(
   FeatureName, [rabbit_queue | Rest]) ->
@@ -622,17 +622,17 @@ copy_from_mnesia_to_khepri(
     copy_from_mnesia_to_khepri(FeatureName, Rest);
 copy_from_mnesia_to_khepri(
   FeatureName, [rabbit_exchange = Table | Rest]) ->
-    Fun = fun rabbit_exchange:mnesia_write_exchange_to_khepri/1,
+    Fun = fun rabbit_store:mnesia_write_exchange_to_khepri/1,
     do_copy_from_mnesia_to_khepri(FeatureName, Table, Fun),
     copy_from_mnesia_to_khepri(FeatureName, Rest);
 copy_from_mnesia_to_khepri(
   FeatureName, [rabbit_durable_exchange = Table | Rest]) ->
-    Fun = fun rabbit_exchange:mnesia_write_durable_exchange_to_khepri/1,
+    Fun = fun rabbit_store:mnesia_write_durable_exchange_to_khepri/1,
     do_copy_from_mnesia_to_khepri(FeatureName, Table, Fun),
     copy_from_mnesia_to_khepri(FeatureName, Rest);
 copy_from_mnesia_to_khepri(
   FeatureName, [rabbit_exchange_serial = Table | Rest]) ->
-    Fun = fun rabbit_exchange:mnesia_write_exchange_serial_to_khepri/1,
+    Fun = fun rabbit_store:mnesia_write_exchange_serial_to_khepri/1,
     do_copy_from_mnesia_to_khepri(FeatureName, Table, Fun),
     copy_from_mnesia_to_khepri(FeatureName, Rest);
 copy_from_mnesia_to_khepri(

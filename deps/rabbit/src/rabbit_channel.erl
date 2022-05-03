@@ -1900,7 +1900,7 @@ binding_action(Fun, SourceNameBin0, DestinationType, DestinationNameBin0,
     check_read_permitted(ExchangeName, User, AuthzContext),
     case rabbit_exchange:lookup(ExchangeName) of
         {error, not_found} ->
-            rabbit_amqqueue:not_found(ExchangeNameBin);
+            rabbit_amqqueue:not_found(ExchangeName);
         {ok, Exchange}     ->
             check_read_permitted_on_topic(Exchange, User, RoutingKey, AuthzContext)
     end,

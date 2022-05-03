@@ -15,16 +15,15 @@
 -export([list/1, list_for_source/1, list_for_destination/1,
          list_for_source_and_destination/2, list_explicit/0]).
 -export([new_deletions/0, combine_deletions/2, add_deletion/3,
-         process_deletions/2]).
+         process_deletions/2, notify_deletions/2]).
 -export([info_keys/0, info/1, info/2, info_all/1, info_all/2, info_all/4]).
 %% these must all be run inside a mnesia tx
--export([has_for_source_in_mnesia/1, remove_for_source_in_mnesia/1,
+-export([has_for_source_in_mnesia/1, has_for_source_in_khepri/1, remove_for_source_in_mnesia/1,
+         remove_for_source_in_khepri/1,
          remove_default_exchange_binding_rows_of/1]).
 
--export([remove_for_source_in_khepri/1,
-         remove_for_destination_in_mnesia/2, remove_for_destination_in_khepri/2,
-         remove_transient_for_destination_in_mnesia/1, remove_transient_for_destination_in_khepri/1,
-         has_for_source_in_khepri/1, process_deletions_in_khepri/2]).
+-export([remove_for_destination_in_mnesia/2, remove_for_destination_in_khepri/2,
+         remove_transient_for_destination_in_mnesia/1, remove_transient_for_destination_in_khepri/1]).
 -export([match_source_in_khepri/1, match_source_and_key_in_khepri/2]).
 -export([match_source_and_destination_in_khepri/2]).
 
@@ -167,7 +166,7 @@ recover_semi_durable_route_txn_in_mnesia(R = #route{binding = B}, X) ->
               case mnesia:read(rabbit_semi_durable_route, B, read) of
                   [] -> no_recover;
                   _  -> ok = sync_transient_route(R, fun mnesia:write/3),
-                        rabbit_exchange:serial_in_mnesia(X)
+                        serial_in_mnesia(X)
               end
       end,
       fun (no_recover, _)     -> ok;
@@ -175,13 +174,21 @@ recover_semi_durable_route_txn_in_mnesia(R = #route{binding = B}, X) ->
           (Serial,     false) -> x_callback(Serial,      X, add_binding, B)
       end).
 
+serial_in_mnesia(X) ->
+    case rabbit_exchange:serialise_events(X) of
+        true ->
+            rabbit_exchange:serial(X, mnesia);
+        false ->
+            none
+    end.
+
 recover_semi_durable_route_txn_in_khepri(Path, X) ->
-    NextSerial0 = rabbit_exchange:prepare_next_serial_in_khepri_tx(X),
+    MaybeSerial = rabbit_exchange:serialise_events(X),
     rabbit_khepri_misc:execute_khepri_transaction(
       fun () ->
               case khepri_tx:get(Path) of
                   {ok, #{Path := #{data := #{bindings := Set}}}} ->
-                      {rabbit_exchange:next_serial_in_khepri_tx(NextSerial0), Set};
+                      {serial_in_khepri(MaybeSerial, X), Set};
                   _ ->
                       no_recover
               end
@@ -193,6 +200,11 @@ recover_semi_durable_route_txn_in_khepri(Path, X) ->
                         end, none, Set),
               ok
       end).
+
+serial_in_khepri(false, _) ->
+    none;
+serial_in_khepri(true, X) ->
+    rabbit_exchange:serial(X, khepri).
 
 -spec exists(rabbit_types:binding()) -> boolean() | bind_errors().
 
@@ -305,11 +317,11 @@ add_in_khepri(#binding{source = SrcName,
 add_binding_and_obtain_serial(Binding, Src, Dst) ->
     Type = binding_type(durable(Src), durable(Dst)),
     Path = khepri_route_path(Binding),
-    NextSerial0 = rabbit_exchange:prepare_next_serial_in_khepri_tx(Src),
+    MaybeSerial = rabbit_exchange:serialise_events(Src),
     rabbit_khepri:transaction(
       fun() ->
               add_binding_tx(Path, Binding, Type),
-              rabbit_exchange:next_serial_in_khepri_tx(NextSerial0)
+              serial_in_khepri(MaybeSerial, Src)
       end, rw).
 
 check_exclusive_access(Q, ConnPid) when ?is_amqqueue(Q) ->
@@ -324,7 +336,7 @@ add_in_mnesia(Src, Dst, B, ActingUser) ->
     ok = sync_route(#route{binding = B}, SrcDurable, DstDurable,
                     fun mnesia:write/3),
     x_callback(transaction, Src, add_binding, B),
-    Serial = rabbit_exchange:serial_in_mnesia(Src),
+    Serial = serial_in_mnesia(Src),
     fun () ->
         x_callback(Serial, Src, add_binding, B),
         ok = rabbit_event:notify(
@@ -397,9 +409,13 @@ remove_in_khepri(#binding{source = SrcName,
                            absent_errs_only_in_khepri(not_found(Errs, SrcName, DstName))
                    end
            end) of
-        ok -> ok;
-        {error, _} = Err -> Err;
-        Deletions -> process_deletions_in_khepri(Deletions, ActingUser)
+        ok ->
+            ok;
+        {error, _} = Err ->
+            Err;
+        Deletions ->
+            process_deletions(Deletions, all),
+            notify_deletions(Deletions, ActingUser)
     end.
 
 remove(Src, Dst, B, ActingUser) ->
@@ -408,7 +424,8 @@ remove(Src, Dst, B, ActingUser) ->
       fun() ->
               ok = delete_binding(B),
               Deletions = maybe_auto_delete_in_khepri(B#binding.source, [B], new_deletions(), false),
-              process_deletions_in_khepri(Deletions, ActingUser)
+              process_deletions(Deletions, all),
+              notify_deletions(Deletions, ActingUser)
       end).
 
 remove_in_mnesia(Src, Dst, B, ActingUser) ->
@@ -416,7 +433,8 @@ remove_in_mnesia(Src, Dst, B, ActingUser) ->
                     fun delete/3),
     Deletions = maybe_auto_delete_in_mnesia(
                   B#binding.source, [B], new_deletions(), false),
-    process_deletions(Deletions, ActingUser).
+    process_deletions(Deletions, true),
+    fun() -> notify_deletions(Deletions, ActingUser) end.
 
 %% Implicit bindings are implicit as of rabbitmq/rabbitmq-server#1721.
 remove_default_exchange_binding_rows_of(Dst = #resource{}) ->
@@ -730,6 +748,7 @@ lookup_resources(Src, Dst) ->
 lookup_resource(#resource{kind = queue} = Name) ->
     rabbit_amqqueue:lookup_as_list_in_khepri(rabbit_queue, Name);
 lookup_resource(#resource{kind = exchange} = Name) ->
+    %% TODO
     rabbit_exchange:lookup_as_list_in_khepri(Name).
 
 sync_route(Route, true, true, Fun) ->
@@ -927,15 +946,6 @@ remove_for_destination_in_mnesia(DstName, OnlyDurable, Fun) ->
     group_bindings_fold(fun maybe_auto_delete_in_mnesia/4, new_deletions(),
                         lists:keysort(#binding.source, Bindings), OnlyDurable).
 
-remove_transient_for_destination_in_khepri(DstName) ->
-    TransientBindingsMap = match_destination_in_khepri(DstName, transient),
-    remove_in_khepri(TransientBindingsMap),
-    Bindings = maps:fold(fun(_, Set, Acc) ->
-                                 sets:to_list(Set) ++ Acc
-                         end, [], TransientBindingsMap),
-    group_bindings_fold(fun maybe_auto_delete_in_khepri/4, new_deletions(),
-                        lists:keysort(#binding.source, Bindings), false).
-
 remove_for_destination_in_khepri(DstName, OnlyDurable) ->
     BindingsMap =
         case OnlyDurable of
@@ -955,6 +965,15 @@ remove_for_destination_in_khepri(DstName, OnlyDurable) ->
                          end, [], BindingsMap),
     group_bindings_fold(fun maybe_auto_delete_in_khepri/4, new_deletions(),
                         lists:keysort(#binding.source, Bindings), OnlyDurable).
+
+remove_transient_for_destination_in_khepri(DstName) ->
+    TransientBindingsMap = match_destination_in_khepri(DstName, transient),
+    remove_in_khepri(TransientBindingsMap),
+    Bindings = maps:fold(fun(_, Set, Acc) ->
+                                 sets:to_list(Set) ++ Acc
+                         end, [], TransientBindingsMap),
+    group_bindings_fold(fun maybe_auto_delete_in_khepri/4, new_deletions(),
+                        lists:keysort(#binding.source, Bindings), false).
 
 %% Instead of locking entire table on remove operations we can lock the
 %% affected resource only.
@@ -1070,54 +1089,63 @@ merge_entry({X1, Deleted1, Bindings1}, {X2, Deleted2, Bindings2}) ->
      anything_but(not_deleted, Deleted1, Deleted2),
      [Bindings1 | Bindings2]}.
 
--spec process_deletions(deletions(), rabbit_types:username()) -> rabbit_misc:thunk('ok').
-
-process_deletions(Deletions, ActingUser) ->
-    AugmentedDeletions =
-        dict:map(fun (_XName, {X, deleted, Bindings}) ->
-                         Bs = lists:flatten(Bindings),
-                         x_callback(transaction, X, delete, Bs),
-                         {X, deleted, Bs, none};
-                     (_XName, {X, not_deleted, Bindings}) ->
-                         Bs = lists:flatten(Bindings),
-                         x_callback(transaction, X, remove_bindings, Bs),
-                         {X, not_deleted, Bs, rabbit_exchange:serial_in_mnesia(X)}
-                 end, Deletions),
-    fun() ->
-            dict:fold(fun (XName, {X, deleted, Bs, Serial}, ok) ->
-                              ok = rabbit_event:notify(
-                                     exchange_deleted,
-                                     [{name, XName},
-                                      {user_who_performed_action, ActingUser}]),
-                              del_notify(Bs, ActingUser),
-                              x_callback(Serial, X, delete, Bs);
-                          (_XName, {X, not_deleted, Bs, Serial}, ok) ->
-                              del_notify(Bs, ActingUser),
-                              x_callback(Serial, X, remove_bindings, Bs)
-                      end, ok, AugmentedDeletions)
-    end.
-
-process_deletions_in_khepri(Deletions, ActingUser) ->
-    %% TODO store notifications as triggers for deletion of the path
-    dict:fold(fun (XName, {X, deleted, Bindings}, ok) ->
-                      Bs = lists:flatten(Bindings),
-                      x_callback([transaction, none], X, delete, Bs),
-                      ok = rabbit_event:notify(
-                             exchange_deleted,
-                             [{name, XName},
-                              {user_who_performed_action, ActingUser}]),
-                      del_notify(Bs, ActingUser);
-                  (_XName, {X, not_deleted, Bindings}, ok) ->
-                      Bs = lists:flatten(Bindings),
-                      Serial = rabbit_exchange:serial_in_khepri(X),
-                      x_callback([transaction, Serial], X, remove_bindings, Bs),
-                      del_notify(Bs, ActingUser)
+notify_deletions({error, not_found}, _) ->
+    ok;
+notify_deletions(Deletions, ActingUser) ->
+    dict:fold(fun (XName, {_X, deleted, Bs, _}, ok) ->
+                      notify_exchange_deletion(XName, ActingUser),
+                      notify_bindings_deletion(Bs, ActingUser);
+                  (_XName, {_X, not_deleted, Bs, _}, ok) ->
+                      notify_bindings_deletion(Bs, ActingUser);
+                  (XName, {_X, deleted, Bs}, ok) ->
+                      notify_exchange_deletion(XName, ActingUser),
+                      notify_bindings_deletion(Bs, ActingUser);
+                  (_XName, {_X, not_deleted, Bs}, ok) ->
+                      notify_bindings_deletion(Bs, ActingUser)
               end, ok, Deletions).
 
-del_notify(Bs, ActingUser) -> [rabbit_event:notify(
-                               binding_deleted,
-                               info(B) ++ [{user_who_performed_action, ActingUser}])
-                             || B <- Bs].
+notify_exchange_deletion(XName, ActingUser) ->
+    ok = rabbit_event:notify(
+           exchange_deleted,
+           [{name, XName},
+            {user_who_performed_action, ActingUser}]).
+
+notify_bindings_deletion(Bs, ActingUser) ->
+    [rabbit_event:notify(binding_deleted,
+                         info(B) ++ [{user_who_performed_action, ActingUser}])
+     || B <- Bs],
+    ok.
+
+-spec process_deletions(deletions(), 'transaction' | 'none') -> rabbit_misc:thunk('ok').
+process_deletions(Deletions, true) ->
+    dict:map(fun (_XName, {X, deleted, Bindings}) ->
+                     Bs = lists:flatten(Bindings),
+                     rabbit_exchange:callback(X, delete, transaction, [X, Bs]),
+                     {X, deleted, Bs, none};
+                 (_XName, {X, not_deleted, Bindings}) ->
+                     Bs = lists:flatten(Bindings),
+                     rabbit_exchange:callback(X, remove_bindings, transaction, [X, Bs]),
+                     {X, not_deleted, Bs, serial_in_mnesia(X)}
+             end, Deletions);
+process_deletions(Deletions, false) ->
+    dict:map(fun (_XName, {X, deleted, Bs, Serial} = Del) ->
+                     rabbit_exchange:callback(X, delete, Serial, [X, Bs]),
+                     Del;
+                 (_XName, {X, not_deleted, Bs, Serial} = Del) ->
+                     rabbit_exchange:callback(X, remove_bindings, Serial, [X, Bs]),
+                     Del
+             end, Deletions);
+process_deletions(Deletions, all) ->
+    dict:map(fun (_XName, {X, deleted, Bindings}) ->
+                     Bs = lists:flatten(Bindings),
+                     rabbit_exchange:callback(X, delete, [transaction, none], [X, Bs]),
+                     {X, deleted, Bs, none};
+                 (_XName, {X, not_deleted, Bindings}) ->
+                     Bs = lists:flatten(Bindings),
+                     Serial = rabbit_exchange:serial(X, khepri),
+                     rabbit_exchange:callback(X, remove_bindings, [transaction, Serial], [X, Bs]),
+                     {X, not_deleted, Bs, Serial}
+             end, Deletions).
 
 x_callback(Serial, X, F, Bs) ->
     ok = rabbit_exchange:callback(X, F, Serial, [X, Bs]).

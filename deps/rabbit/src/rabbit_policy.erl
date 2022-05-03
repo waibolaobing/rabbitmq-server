@@ -250,9 +250,7 @@ recover() ->
 %% recovery has not yet happened; we must work with the rabbit_durable_<thing>
 %% variants.
 recover0() ->
-    Xs0 = rabbit_khepri:try_mnesia_or_khepri(
-            fun() -> rabbit_exchange:list_in_mnesia(rabbit_durable_exchange) end,
-            fun() -> rabbit_exchange:list_durable_in_khepri() end),
+    Xs0 = rabbit_store:list_durable_exchanges(),
     Policies = list(),
     OpPolicies = list_op(),
     Xs = [rabbit_exchange_decorator:set(
@@ -270,7 +268,7 @@ recover0() ->
       fun() ->
               rabbit_khepri:transaction(
                 fun() ->
-                        [rabbit_exchange:store_in_khepri(X, rabbit_durable_exchange) || X <- Xs]
+                        [rabbit_exchange:update_exchange(X, khepri) || X <- Xs]
                 end, rw)
       end),
     [begin
@@ -485,14 +483,14 @@ update_matched_objects_in_mnesia(VHost) ->
                 {'EXIT', Exit} ->
                     exit(Exit);
                 {Policies, OpPolicies} ->
-                    {[update_exchange(X, Policies, OpPolicies) ||
+                    {[update_exchange_in_mnesia(X, Policies, OpPolicies) ||
                         X <- rabbit_exchange:list_in_mnesia(rabbit_exchange, VHost)],
                     [update_queue(Q, Policies, OpPolicies) ||
                         Q <- rabbit_amqqueue:list_in_mnesia(rabbit_queue, VHost)]}
                 end
         end).
 
-update_exchange(X = #exchange{name = XName,
+update_exchange_in_mnesia(X = #exchange{name = XName,
                               policy = OldPolicy,
                               operator_policy = OldOpPolicy},
                 Policies, OpPolicies) ->
@@ -500,12 +498,13 @@ update_exchange(X = #exchange{name = XName,
         {OldPolicy, OldOpPolicy} -> no_change;
         {NewPolicy, NewOpPolicy} ->
             NewExchange = rabbit_exchange:update(
-                XName,
-                fun(X0) ->
-                    rabbit_exchange_decorator:set(
-                        X0 #exchange{policy = NewPolicy,
-                                     operator_policy = NewOpPolicy})
-                    end),
+                            XName,
+                            fun(X0) ->
+                                    rabbit_exchange_decorator:set(
+                                      X0 #exchange{policy = NewPolicy,
+                                                   operator_policy = NewOpPolicy})
+                            end,
+                            mnesia),
             case NewExchange of
                 #exchange{} = X1 -> {X, X1};
                 not_found        -> {X, X }
@@ -543,7 +542,7 @@ update_matched_objects_in_khepri(VHost) ->
                        {'EXIT', _} = Err ->
                            {error, Err};
                        {Policies, OpPolicies} ->
-                           Exchanges = rabbit_exchange:list_in_khepri_tx(VHost),
+                           Exchanges = rabbit_store:list_exchanges_in_khepri_tx(VHost),
                            Queues = rabbit_amqqueue:list_in_khepri_tx(VHost),
                            {ok, #{policies => Policies,
                                   op_policies => OpPolicies,
@@ -563,22 +562,23 @@ update_matched_objects_in_khepri(VHost) ->
             Queues = [get_updated_queue(Q, Policies, OpPolicies) || Q <- Queues0],
             rabbit_khepri:transaction(
               fun() ->
-                      {[update_exchange(Map) || Map <- Exchanges, is_map(Map)],
+                      {[update_exchange_in_khepri(Map) || Map <- Exchanges, is_map(Map)],
                        [update_queue(Map) || Map <- Queues, is_map(Map)]}
               end, rw)
     end.
 
-update_exchange(#{exchange := X = #exchange{name = XName},
+update_exchange_in_khepri(#{exchange := X = #exchange{name = XName},
                   policy := NewPolicy,
                   op_policy := NewOpPolicy,
                   decorators := Decorators}) ->
-    NewExchange = rabbit_exchange:update_in_khepri(
+    NewExchange = rabbit_exchange:update(
                     XName,
                     fun(X0) ->
                             X0 #exchange{policy = NewPolicy,
                                          operator_policy = NewOpPolicy,
                                          decorators = Decorators}
-                    end),
+                    end,
+                    khepri),
     case NewExchange of
         #exchange{} = X1 -> {X, X1};
         not_found        -> {X, X }

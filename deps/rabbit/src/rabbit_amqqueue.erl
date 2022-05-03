@@ -2152,11 +2152,11 @@ internal_delete_in_mnesia(QueueName, ActingUser, Reason) ->
                   {[], []} ->
                       rabbit_misc:const(ok);
                   _ ->
-                      Deletions = internal_delete1_in_mnesia(QueueName, false, Reason),
-                      T = rabbit_binding:process_deletions(Deletions,
-                                                           ?INTERNAL_USER),
+                      Deletions0 = internal_delete1_in_mnesia(QueueName, false, Reason),
+                      Deletions = rabbit_binding:process_deletions(Deletions0, true),
                       fun() ->
-                              ok = T(),
+                              rabbit_binding:process_deletions(Deletions, false),
+                              rabbit_binding:notify_deletions(Deletions0, ?INTERNAL_USER),
                               rabbit_core_metrics:queue_deleted(QueueName),
                               ok = rabbit_event:notify(queue_deleted,
                                                        [{name, QueueName},
@@ -2179,11 +2179,8 @@ internal_delete_in_khepri(QueueName, ActingUser, Reason) ->
         ok ->
             ok;
         Deletions ->
-            %% TODO this is a bunch of notifications, and maybe something else?
-            %% It can't happen inside of the transaction :scream:
-            T = rabbit_binding:process_deletions(Deletions,
-                                                 ?INTERNAL_USER),
-            ok = T(),
+            rabbit_binding:process_deletions(Deletions, all),
+            rabbit_binding:notify_deletions(Deletions, ?INTERNAL_USER),
             %% TODO core metrics ops are ETS ops. They can't happen
             %% inside of a transaction
             rabbit_core_metrics:queue_deleted(QueueName),
@@ -2454,18 +2451,18 @@ queues_to_delete_when_node_down_in_khepri(NodeDown) ->
     end.
 
 notify_queue_binding_deletions(QueueDeletions) ->
-    rabbit_misc:execute_mnesia_tx_with_tail(
-        fun() ->
-            rabbit_binding:process_deletions(
-                lists:foldl(
-                    fun rabbit_binding:combine_deletions/2,
-                    rabbit_binding:new_deletions(),
-                    QueueDeletions
-                ),
-                ?INTERNAL_USER
-            )
-        end
-    ).
+    rabbit_misc:execute_mnesia_transaction(
+      fun() ->
+              Deletions = rabbit_binding:process_deletions(
+                            lists:foldl(
+                              fun rabbit_binding:combine_deletions/2,
+                              rabbit_binding:new_deletions(),
+                              QueueDeletions
+                             ),
+                            true),
+              rabbit_binding:notify_deletions(Deletions, ?INTERNAL_USER)
+      end
+     ).
 
 notify_queues_deleted(QueueDeletions) ->
     lists:foreach(
