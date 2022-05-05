@@ -17,9 +17,7 @@
          route/2, delete/3, validate_binding/2, count/0]).
 -export([list_names/0, is_amq_prefixed/1]).
 -export([serialise_events/1]).
-%% these must be run inside a tx
--export([serial/2, update/3, update/2]).
--export([maybe_auto_delete_in_mnesia/2, maybe_auto_delete_in_khepri/2]).
+-export([serial/1]).
 -export([peek_serial/2]).
 %%----------------------------------------------------------------------------
 
@@ -78,10 +76,13 @@ serialise_events(X = #exchange{type = Type, decorators = Decorators}) ->
               rabbit_exchange_decorator:select(all, Decorators))
         orelse (type_to_module(Type)):serialise_events().
 
--spec serial(rabbit_types:exchange(), 'mnesia' | 'khepri') ->
+-spec serial(rabbit_types:exchange()) ->
           'none' | pos_integer().
-serial(X, Store) ->
-    rabbit_store:next_exchange_serial(X, Store).
+serial(X) ->
+    case rabbit_exchange:serialise_events(X) of
+        false -> 'none';
+        true -> rabbit_store:next_exchange_serial(X)
+    end.
 
 -spec peek_serial(name(), mnesia | khepri) -> pos_integer() | 'undefined'.
 peek_serial(XName, Store) ->
@@ -293,17 +294,6 @@ update_scratch_fun(App, Fun, Decorators) ->
 update_decorators(Name) ->
     rabbit_store:update_exchange_decorators(Name).
 
--spec update
-        (name(),
-         fun((rabbit_types:exchange()) -> rabbit_types:exchange()))
-         -> not_found | rabbit_types:exchange().
-
-update(Name, Fun, Store) ->
-    rabbit_store:update_exchange(Name, Fun, Store).
-
-update(X, Store) ->
-    rabbit_store:update_exchange(X, Store).
-
 -spec immutable(rabbit_types:exchange()) -> rabbit_types:exchange().
 
 immutable(X) -> X#exchange{scratches  = none,
@@ -445,10 +435,6 @@ cons_if_present(XName, L) ->
                     'ok' | rabbit_types:error('not_found').
 
 delete(XName, IfUnused, Username) ->
-    Fun = case IfUnused of
-              true  -> fun conditional_delete/1;
-              false -> fun unconditional_delete/1
-          end,
     try
         %% guard exchange.declare operations from failing when there's
         %% a race condition between it and an exchange.delete.
@@ -457,7 +443,7 @@ delete(XName, IfUnused, Username) ->
         rabbit_runtime_parameters:set(XName#resource.virtual_host,
                                       ?EXCHANGE_DELETE_IN_PROGRESS_COMPONENT,
                                       XName#resource.name, true, Username),
-        Deletions = rabbit_store:delete_exchange(XName, Fun, fun process_deletions/2),
+        Deletions = rabbit_store:delete_exchange(XName, IfUnused, fun process_deletions/2),
         rabbit_binding:notify_deletions(Deletions, Username)
     after
         rabbit_runtime_parameters:clear(XName#resource.virtual_host,
@@ -481,60 +467,6 @@ process_deletions(Deletions, IsTransaction) ->
 validate_binding(X = #exchange{type = XType}, Binding) ->
     Module = type_to_module(XType),
     Module:validate_binding(X, Binding).
-
--spec maybe_auto_delete_in_mnesia
-        (rabbit_types:exchange(), boolean())
-        -> 'not_deleted' | {'deleted', rabbit_binding:deletions()}.
-
-%% TODO migrate with rabbit_binding
-maybe_auto_delete_in_mnesia(#exchange{auto_delete = false}, _OnlyDurable) ->
-    not_deleted;
-maybe_auto_delete_in_mnesia(#exchange{auto_delete = true} = X, OnlyDurable) ->
-    case conditional_delete_in_mnesia(X, OnlyDurable) of
-        {error, in_use}             -> not_deleted;
-        {deleted, X, [], Deletions} -> {deleted, Deletions}
-    end.
-
-maybe_auto_delete_in_khepri(XName, OnlyDurable) ->
-    case rabbit_store:lookup_exchange_tx(XName, khepri) of
-        [] ->
-            {not_deleted, undefined};
-        [#exchange{auto_delete = false} = X] ->
-            {not_deleted, X};
-        [#exchange{auto_delete = true} = X] ->
-            case conditional_delete_in_khepri(X, OnlyDurable) of
-                {error, in_use}             -> {not_deleted, X};
-                {deleted, X, [], Deletions} -> {deleted, X, Deletions}
-            end
-    end.
-
-conditional_delete(mnesia) ->
-    fun conditional_delete_in_mnesia/2;
-conditional_delete(khepri) ->
-    fun conditional_delete_in_khepri/2.
-
-conditional_delete_in_mnesia(X = #exchange{name = XName}, OnlyDurable) ->
-    case rabbit_binding:has_for_source_in_mnesia(XName) of
-        false  -> rabbit_store:delete_exchange_in_mnesia(X, OnlyDurable, false);
-        true   -> {error, in_use}
-    end.
-
-conditional_delete_in_khepri(X = #exchange{name = XName}, OnlyDurable) ->
-    case rabbit_binding:has_for_source_in_khepri(XName) of
-        false  -> rabbit_store:delete_exchange_in_khepri(X, OnlyDurable, false);
-        true   -> {error, in_use}
-    end.
-
-unconditional_delete(mnesia) ->
-    fun unconditional_delete_in_mnesia/2;
-unconditional_delete(khepri) ->
-    fun unconditional_delete_in_khepri/2.
-
-unconditional_delete_in_mnesia(X, OnlyDurable) ->
-    rabbit_store:delete_exchange_in_mnesia(X, OnlyDurable, true).
-
-unconditional_delete_in_khepri(X, OnlyDurable) ->
-    rabbit_store:delete_exchange_in_khepri(X, OnlyDurable, true).
 
 invalid_module(T) ->
     rabbit_log:warning("Could not find exchange type ~s.", [T]),

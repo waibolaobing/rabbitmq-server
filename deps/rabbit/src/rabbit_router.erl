@@ -35,7 +35,7 @@ match_bindings(SrcName, Match) ->
                            Routes, Match(Binding)]
       end,
       fun() ->
-              Data = rabbit_binding:match_source_in_khepri(SrcName),
+              Data = rabbit_store:match_source_in_khepri(SrcName),
               Bindings = lists:foldl(fun(#{bindings := SetOfBindings}, Acc) ->
                                             sets:to_list(SetOfBindings) ++ Acc
                                     end, [], maps:values(Data)),
@@ -89,4 +89,4 @@ find_routes(MatchHead, Conditions) ->
     ets:select(rabbit_route, [{MatchHead, Conditions, ['$1']}]).
 
 find_routes_in_khepri(SrcName, RoutingKeys) ->
-    rabbit_binding:match_source_and_key_in_khepri(SrcName, RoutingKeys).
+    rabbit_store:match_source_and_key_in_khepri(SrcName, RoutingKeys).

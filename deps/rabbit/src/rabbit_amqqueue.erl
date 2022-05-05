@@ -2119,7 +2119,7 @@ internal_delete1_in_mnesia(QueueName, OnlyDurable, Reason) ->
     end,
     %% we want to execute some things, as decided by rabbit_exchange,
     %% after the transaction.
-    rabbit_binding:remove_for_destination_in_mnesia(QueueName, OnlyDurable).
+    rabbit_store:remove_bindings_for_destination_in_mnesia(QueueName, OnlyDurable).
 
 internal_delete1_in_khepri(QueueName, OnlyDurable, _Reason) ->
     Path = mnesia_table_to_khepri_path(rabbit_queue, QueueName),
@@ -2128,7 +2128,7 @@ internal_delete1_in_khepri(QueueName, OnlyDurable, _Reason) ->
     {ok, _} = khepri_tx:delete(DurablePath),
     %% we want to execute some things, as decided by rabbit_exchange,
     %% after the transaction.
-    rabbit_binding:remove_for_destination_in_khepri(QueueName, OnlyDurable).
+    rabbit_store:remove_bindings_for_destination_in_khepri(QueueName, OnlyDurable).
 
 -spec internal_delete(name(), rabbit_types:username()) -> 'ok'.
 
@@ -2401,11 +2401,11 @@ delete_queues_on_node_down(Node) ->
 
 delete_queue_in_mnesia(QueueName) ->
     ok = mnesia:delete({rabbit_queue, QueueName}),
-    rabbit_binding:remove_transient_for_destination_in_mnesia(QueueName).
+    rabbit_store:remove_transient_bindings_for_destination_in_mnesia(QueueName).
 
 delete_queue_in_khepri(QueueName) ->
     {ok, _} = khepri_tx:delete(khepri_queue_path(QueueName)),
-    rabbit_binding:remove_transient_for_destination_in_khepri(QueueName).
+    rabbit_store:remove_transient_bindings_for_destination_in_khepri(QueueName).
 
 % If there are many queues and we delete them all in a single Mnesia transaction,
 % this can block all other Mnesia operations for a really long time.

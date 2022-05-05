@@ -409,10 +409,10 @@ mnesia_write_to_khepri(#topic_trie_binding{trie_binding = #trie_binding{exchange
     %% We'll probably update multiple times the bindings that differ only on the arguments,
     %% but that is fine. Migration happens only once, so it is better to do a bit more of work
     %% than skipping bindings because out of order arguments.
-    Map = rabbit_binding:match_source_and_destination_in_khepri(X, D),
+    Values = rabbit_store:match_source_and_destination_in_khepri(X, D),
     Bindings = lists:foldl(fun(#{bindings := SetOfBindings}, Acc) ->
                                    sets:to_list(SetOfBindings) ++ Acc
-                           end, [], maps:values(Map)),
+                           end, [], Values),
     [internal_add_binding_in_khepri(X, K, D, Args) || #binding{key = K,
                                                                args = Args} <- Bindings],
     ok.

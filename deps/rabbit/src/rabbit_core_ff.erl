@@ -532,19 +532,19 @@ clear_data_from_previous_attempt(
     clear_data_from_previous_attempt(FeatureName, Rest);
 clear_data_from_previous_attempt(
   FeatureName, [rabbit_durable_route | Rest]) ->
-    ok = rabbit_binding:clear_route_in_khepri(),
+    ok = rabbit_store:clear_route_in_khepri(),
     clear_data_from_previous_attempt(FeatureName, Rest);
 clear_data_from_previous_attempt(
   FeatureName, [rabbit_semi_durable_route | Rest]) ->
-    ok = rabbit_binding:clear_route_in_khepri(),
+    ok = rabbit_store:clear_route_in_khepri(),
     clear_data_from_previous_attempt(FeatureName, Rest);
 clear_data_from_previous_attempt(
   FeatureName, [rabbit_route | Rest]) ->
-    ok = rabbit_binding:clear_route_in_khepri(),
+    ok = rabbit_store:clear_route_in_khepri(),
     clear_data_from_previous_attempt(FeatureName, Rest);
 clear_data_from_previous_attempt(
   FeatureName, [rabbit_reverse_route | Rest]) ->
-    ok = rabbit_binding:clear_route_in_khepri(),
+    ok = rabbit_store:clear_route_in_khepri(),
     clear_data_from_previous_attempt(FeatureName, Rest);
 clear_data_from_previous_attempt(
   FeatureName, [rabbit_topic_trie_node | Rest]) ->
@@ -637,22 +637,22 @@ copy_from_mnesia_to_khepri(
     copy_from_mnesia_to_khepri(FeatureName, Rest);
 copy_from_mnesia_to_khepri(
   FeatureName, [rabbit_durable_route = Table | Rest]) ->
-    Fun = fun rabbit_binding:mnesia_write_durable_route_to_khepri/1,
+    Fun = fun rabbit_store:mnesia_write_durable_route_to_khepri/1,
     do_copy_from_mnesia_to_khepri(FeatureName, Table, Fun),
     copy_from_mnesia_to_khepri(FeatureName, Rest);
 copy_from_mnesia_to_khepri(
   FeatureName, [rabbit_semi_durable_route = Table | Rest]) ->
-    Fun = fun rabbit_binding:mnesia_write_semi_durable_route_to_khepri/1,
+    Fun = fun rabbit_store:mnesia_write_semi_durable_route_to_khepri/1,
     do_copy_from_mnesia_to_khepri(FeatureName, Table, Fun),
     copy_from_mnesia_to_khepri(FeatureName, Rest);
 copy_from_mnesia_to_khepri(
   FeatureName, [rabbit_route = Table | Rest]) ->
-    Fun = fun rabbit_binding:mnesia_write_route_to_khepri/1,
+    Fun = fun rabbit_store:mnesia_write_route_to_khepri/1,
     do_copy_from_mnesia_to_khepri(FeatureName, Table, Fun),
     copy_from_mnesia_to_khepri(FeatureName, Rest);
 copy_from_mnesia_to_khepri(
   FeatureName, [rabbit_reverse_route = Table | Rest]) ->
-    Fun = fun rabbit_binding:mnesia_write_reverse_route_to_khepri/1,
+    Fun = fun rabbit_store:mnesia_write_reverse_route_to_khepri/1,
     do_copy_from_mnesia_to_khepri(FeatureName, Table, Fun),
     copy_from_mnesia_to_khepri(FeatureName, Rest);
 copy_from_mnesia_to_khepri(
