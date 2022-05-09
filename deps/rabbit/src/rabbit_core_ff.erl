@@ -524,11 +524,11 @@ clear_data_from_previous_attempt(
     clear_data_from_previous_attempt(FeatureName, Rest);
 clear_data_from_previous_attempt(
   FeatureName, [rabbit_queue | Rest]) ->
-    ok = rabbit_amqqueue:clear_queue_data_in_khepri(),
+    ok = rabbit_store:clear_queue_data_in_khepri(),
     clear_data_from_previous_attempt(FeatureName, Rest);
 clear_data_from_previous_attempt(
   FeatureName, [rabbit_durable_queue | Rest]) ->
-    ok = rabbit_amqqueue:clear_durable_queue_data_in_khepri(),
+    ok = rabbit_store:clear_durable_queue_data_in_khepri(),
     clear_data_from_previous_attempt(FeatureName, Rest);
 clear_data_from_previous_attempt(
   FeatureName, [rabbit_durable_route | Rest]) ->
@@ -612,12 +612,12 @@ copy_from_mnesia_to_khepri(
     copy_from_mnesia_to_khepri(FeatureName, Rest);
 copy_from_mnesia_to_khepri(
   FeatureName, [rabbit_queue = Table | Rest]) ->
-    Fun = fun rabbit_amqqueue:mnesia_write_queue_to_khepri/1,
+    Fun = fun rabbit_store:mnesia_write_queue_to_khepri/1,
     do_copy_from_mnesia_to_khepri(FeatureName, Table, Fun),
     copy_from_mnesia_to_khepri(FeatureName, Rest);
 copy_from_mnesia_to_khepri(
   FeatureName, [rabbit_durable_queue = Table | Rest]) ->
-    Fun = fun rabbit_amqqueue:mnesia_write_durable_queue_to_khepri/1,
+    Fun = fun rabbit_store:mnesia_write_durable_queue_to_khepri/1,
     do_copy_from_mnesia_to_khepri(FeatureName, Table, Fun),
     copy_from_mnesia_to_khepri(FeatureName, Rest);
 copy_from_mnesia_to_khepri(
@@ -810,9 +810,9 @@ handle_mnesia_delete(rabbit_topic_permission, TopicPermissionKey) ->
 handle_mnesia_delete(rabbit_runtime_parameters, RuntimeParamKey) ->
     rabbit_runtime_parameters:mnesia_delete_to_khepri(RuntimeParamKey);
 handle_mnesia_delete(rabbit_queue, QName) ->
-    rabbit_amqqueue:mnesia_delete_to_khepri(QName);
+    rabbit_store:mnesia_delete_queue_to_khepri(QName);
 handle_mnesia_delete(rabbit_durable_queue, QName) ->
-    rabbit_amqqueue:mnesia_delete_durable_to_khepri(QName).
+    rabbit_store:mnesia_delete_durable_queue_to_khepri(QName).
 
 
 %% We can't remove unused tables at this point yet. The reason is that tables

@@ -296,7 +296,7 @@ become_leader(QName, Name) ->
     %% we need to ensure there is no chance of blocking as else the ra node
     %% may not be able to establish it's leadership
     spawn(fun() ->
-                  rabbit_amqqueue:update_in_tx(QName, Fun),
+                  rabbit_amqqueue:update(QName, Fun),
                   case rabbit_amqqueue:lookup(QName) of
                       {ok, Q0} when ?is_amqqueue(Q0) ->
                           Nodes = get_nodes(Q0),
@@ -502,7 +502,7 @@ repair_amqqueue_nodes(Q0) ->
                           TS = TS0#{nodes => RaNodes},
                           amqqueue:set_type_state(Q, TS)
                   end,
-            rabbit_amqqueue:update_in_tx(QName, Fun),
+            rabbit_amqqueue:update(QName, Fun),
             repaired
     end.
 
@@ -1053,7 +1053,7 @@ add_member(Q, Node, Timeout) when ?amqqueue_is_quorum(Q) ->
                                              end),
                                   amqqueue:set_pid(Q2, Leader)
                           end,
-                    rabbit_amqqueue:update_in_tx(QName, Fun),
+                    rabbit_amqqueue:update(QName, Fun),
                     ok;
                 {timeout, _} ->
                     _ = ra:force_delete_server(?RA_SYSTEM, ServerId),
@@ -1106,7 +1106,7 @@ delete_member(Q, Node) when ?amqqueue_is_quorum(Q) ->
                                     end)
                           end,
                     %% TODO
-                    rabbit_amqqueue:update_in_tx(QName, Fun),
+                    rabbit_amqqueue:update(QName, Fun),
                     case ra:force_delete_server(?RA_SYSTEM, ServerId) of
                         ok ->
                             ok;

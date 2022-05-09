@@ -197,7 +197,7 @@ init_it_in_mnesia(Self, GM, Node, QName) ->
     end.
 
 init_it_in_khepri(Self, GM, Node, QName) ->
-    case rabbit_amqqueue:lookup_as_list_in_khepri(rabbit_queue, QName) of
+    case rabbit_store:lookup_queue_in_khepri_tx(rabbit_queue, QName) of
         [Q] when ?is_amqqueue(Q) ->
             QPid = amqqueue:get_pid(Q),
             SPids = amqqueue:get_slave_pids(Q),

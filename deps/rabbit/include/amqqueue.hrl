@@ -120,7 +120,7 @@
 -define(enable_quorum_queue_if_debug, noop).
 -endif.
 
--define(try_mnesia_tx_or_upgrade_amqqueue_and_retry(Expr1, Expr2),
+-define(try_tx_or_upgrade_amqqueue_and_retry(Expr1, Expr2),
         try
             ?enable_quorum_queue_if_debug,
             Expr1

@@ -163,7 +163,7 @@ remove_from_queue_in_khepri(QueueName, Self, DeadGMPids) ->
       fun () ->
               %% Someone else could have deleted the queue before we
               %% get here. Or, gm group could've altered. see rabbitmq-server#914
-              case rabbit_amqqueue:lookup_as_list_in_khepri(rabbit_queue, QueueName) of
+              case rabbit_store:lookup_queue_in_khepri_tx(rabbit_queue, QueueName) of
                   [] -> {error, not_found};
                   [Q0] when ?is_amqqueue(Q0) ->
                       QPid = amqqueue:get_pid(Q0),
@@ -524,7 +524,7 @@ remove_all_slaves_in_khepri(QName, PendingSlavePids) ->
     Decorators = rabbit_queue_decorator:list(),
     rabbit_khepri:transaction(
       fun () ->
-              [Q0] = rabbit_amqqueue:lookup_as_list_in_khepri(rabbit_queue, QName),
+              [Q0] = rabbit_store:lookup_queue_in_khepri_tx(rabbit_queue, QName),
               Q1 = amqqueue:set_gm_pids(Q0, []),
               Q2 = amqqueue:set_slave_pids(Q1, []),
               %% Restarted mirrors on running nodes can
