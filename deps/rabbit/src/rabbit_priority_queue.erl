@@ -105,20 +105,8 @@ mutate_name_bin(P, NameBin) ->
     <<NameBin/binary, 0, P:8>>.
 
 expand_queues(QNames) ->
-    rabbit_khepri:try_mnesia_or_khepri(
-      fun() ->
-              lists:unzip(
-                lists:append([expand_queue_in_mnesia(QName) || QName <- QNames]))
-      end,
-      fun() ->
-              Qs = rabbit_amqqueue:lookup_in_khepri(rabbit_durable_queue, QNames),
-              lists:unzip(
-                lists:append([expand_queue(Q) || Q <- Qs]))
-      end).
-
-expand_queue_in_mnesia(QName) ->
-    {ok, Q} = rabbit_misc:dirty_read({rabbit_durable_queue, QName}),
-    expand_queue(Q).
+    Qs = rabbit_store:lookup_durable_queues(QNames),
+    lists:unzip(lists:append([expand_queue(Q) || Q <- Qs])).
 
 expand_queue(Q) ->
     #resource{name = QNameBin} = QName = amqqueue:get_name(Q),

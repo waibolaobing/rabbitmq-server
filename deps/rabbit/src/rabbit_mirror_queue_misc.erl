@@ -446,7 +446,7 @@ store_updated_slaves_in_khepri(Q0, Decorators) ->
     %% The amqqueue was read from this transaction, no need to handle
     %% migration.
     Q4 = amqqueue:set_decorators(Q3, Decorators),
-    rabbit_amqqueue:store_queue_in_khepri(Q4),
+    rabbit_store:store_queue_in_khepri(Q4),
     %% Wake it up so that we emit a stats event
     %% TODO check this notification in khepri tx!!! It ends up calling the queue type,
     %% it could do anything. I think it should be a side-effect

@@ -456,8 +456,8 @@ update_matched_objects_in_mnesia(VHost) ->
                 {Policies, OpPolicies} ->
                     {[update_exchange_in_mnesia(X, Policies, OpPolicies) ||
                         X <- rabbit_store:list_exchanges_in_mnesia(VHost)],
-                    [update_queue(Q, Policies, OpPolicies) ||
-                        Q <- rabbit_amqqueue:list_in_mnesia(rabbit_queue, VHost)]}
+                    [update_queue_in_mnesia(Q, Policies, OpPolicies) ||
+                        Q <- rabbit_store:list_queues_in_mnesia(VHost)]}
                 end
         end).
 
@@ -481,7 +481,7 @@ update_exchange_in_mnesia(X = #exchange{name = XName,
             end
     end.
 
-update_queue(Q0, Policies, OpPolicies) when ?is_amqqueue(Q0) ->
+update_queue_in_mnesia(Q0, Policies, OpPolicies) when ?is_amqqueue(Q0) ->
     QName = amqqueue:get_name(Q0),
     OldPolicy = amqqueue:get_policy(Q0),
     OldOpPolicy = amqqueue:get_operator_policy(Q0),
@@ -495,7 +495,7 @@ update_queue(Q0, Policies, OpPolicies) when ?is_amqqueue(Q0) ->
                     QFun3 = amqqueue:set_policy_version(QFun2, NewPolicyVersion),
                     rabbit_queue_decorator:set(QFun3)
                 end,
-            NewQueue = rabbit_amqqueue:update(QName, F),
+            NewQueue = rabbit_store:update_queue_in_mnesia(QName, F),
             case NewQueue of
                  Q1 when ?is_amqqueue(Q1) ->
                     {Q0, Q1};
@@ -513,7 +513,7 @@ update_matched_objects_in_khepri(VHost) ->
                            {error, Err};
                        {Policies, OpPolicies} ->
                            Exchanges = rabbit_store:list_exchanges_in_khepri_tx(VHost),
-                           Queues = rabbit_amqqueue:list_in_khepri_tx(VHost),
+                           Queues = rabbit_store:list_queues_in_khepri_tx(VHost),
                            {ok, #{policies => Policies,
                                   op_policies => OpPolicies,
                                   exchanges => Exchanges,
@@ -533,7 +533,7 @@ update_matched_objects_in_khepri(VHost) ->
             rabbit_khepri:transaction(
               fun() ->
                       {[update_exchange_in_khepri(Map) || Map <- Exchanges, is_map(Map)],
-                       [update_queue(Map) || Map <- Queues, is_map(Map)]}
+                       [update_queue_in_khepri(Map) || Map <- Queues, is_map(Map)]}
               end, rw)
     end.
 
@@ -580,7 +580,7 @@ get_updated_queue(Q0, Policies, OpPolicies) when ?is_amqqueue(Q0) ->
               decorators => Decorators}
     end.
 
-update_queue(#{queue := Q0, policy := NewPolicy, op_policy := NewOpPolicy, decorators := Decorators}) ->
+update_queue_in_khepri(#{queue := Q0, policy := NewPolicy, op_policy := NewOpPolicy, decorators := Decorators}) ->
     QName = amqqueue:get_name(Q0),
     F = fun (QFun0) ->
                 QFun1 = amqqueue:set_policy(QFun0, NewPolicy),
@@ -589,7 +589,7 @@ update_queue(#{queue := Q0, policy := NewPolicy, op_policy := NewOpPolicy, decor
                 QFun3 = amqqueue:set_policy_version(QFun2, NewPolicyVersion),
                 amqqueue:set_decorators(QFun3, Decorators)
         end,
-    NewQueue = rabbit_amqqueue:update(QName, F),
+    NewQueue = rabbit_store:update_queue_in_khepri(QName, F),
     case NewQueue of
         Q1 when ?is_amqqueue(Q1) ->
             {Q0, Q1};

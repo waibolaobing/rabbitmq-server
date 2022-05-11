@@ -922,7 +922,7 @@ share_dist_and_proxy_ports_map(Config) ->
     Config.
 
 configure_metadata_store(Config) ->
-    case ?config(metadata_store, NodeConfig) of
+    case ?config(metadata_store, Config) of
         khepri ->
             case enable_feature_flag(Config, raft_based_metadata_store_phase1) of
                 ok ->

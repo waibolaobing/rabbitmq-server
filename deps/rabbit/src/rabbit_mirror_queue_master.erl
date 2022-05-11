@@ -149,7 +149,7 @@ migrate_queue_record_in_khepri(QName, GM, Self) ->
                   Q3 = amqqueue:set_state(Q2, live),
                   %% Todo it's missing the decorators, but at the moment we don't support
                   %% HA in khepri
-                  ok = rabbit_amqqueue:store_queue_in_khepri(Q3)
+                  ok = rabbit_store:store_queue_in_khepri(Q3)
           end,
     ok = rabbit_khepri:transaction(Fun, rw).
 

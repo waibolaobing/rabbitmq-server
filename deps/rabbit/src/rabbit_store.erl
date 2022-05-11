@@ -16,8 +16,7 @@
          update_exchange_decorators/1, update_exchange_scratch/2,
          create_exchange/2, list_exchanges/1, list_durable_exchanges/0,
          lookup_exchange/1, lookup_many_exchanges/1, peek_exchange_serial/3,
-         next_exchange_serial/1,
-         next_exchange_serial/2, delete_exchange_in_khepri/3,
+         next_exchange_serial/1, delete_exchange_in_khepri/3,
          delete_exchange_in_mnesia/3, delete_exchange/3,
          recover_exchanges/1, store_durable_exchanges/1]).
 
@@ -36,17 +35,13 @@
          store_exchange_in_khepri/1]).
 
 %% TODO used by rabbit policy. to become internal
--export([list_exchanges_in_mnesia/1]).
-
+-export([list_exchanges_in_mnesia/1, list_queues_in_khepri_tx/1,
+         list_queues_in_mnesia/1, update_queue_in_mnesia/2, update_queue_in_khepri/2]).
 %% TODO used by topic exchange. Should it be internal?
 -export([match_source_and_destination_in_khepri/2]).
 
 %% TODO used by rabbit_router. It should become internal
 -export([match_source_in_khepri/1, match_source_and_key_in_khepri/2]).
-
-%% TODO used by rabbit_amqqueue. It should become internal
--export([remove_transient_bindings_for_destination_in_mnesia/1,
-         remove_transient_bindings_for_destination_in_khepri/1]).
 
 -export([mnesia_write_route_to_khepri/1, mnesia_write_durable_route_to_khepri/1,
          mnesia_write_semi_durable_route_to_khepri/1, mnesia_write_reverse_route_to_khepri/1,
@@ -55,13 +50,17 @@
 -export([list_queues/0, list_queues/1, list_durable_queues/0, list_durable_queues/1,
          list_durable_queues_by_type/1, list_queue_names/0, count_queues/0, count_queues/1,
          delete_queue/2, internal_delete_queue/3, update_queue/2, lookup_queues/1,
-         lookup_durable_queue/1]).
+         lookup_queue/1, lookup_durable_queue/1, delete_transient_queues/1,
+         update_queue_decorators/1, not_found_or_absent_queue_dirty/1,
+         lookup_durable_queues/1]).
 
 -export([mnesia_write_queue_to_khepri/1, mnesia_write_durable_queue_to_khepri/1,
          mnesia_delete_queue_to_khepri/1, mnesia_delete_durable_queue_to_khepri/1,
-         clear_queue_data_in_khepri/0, clear_durable_queue_data_in_khepri/0]).
+         clear_queue_data_in_khepri/0, clear_durable_queue_data_in_khepri/0,
+         store_queue/2, store_queues/1, store_queue_without_recover/2,
+         store_queue_dirty/1]).
 
-%% TODO maybe refactor after queues are migrated
+%% TODO maybe refactor after queues are migrated.
 -export([store_durable_queue/1]).
 
 %% TODO to become internal
@@ -214,31 +213,34 @@ peek_exchange_serial(XName, _LockType, khepri) ->
 
 next_exchange_serial(X) ->
     rabbit_khepri:try_mnesia_or_khepri(
-      fun() -> next_exchange_serial(X, mnesia) end,
-      fun() -> next_exchange_serial(X, khepri) end).               
+      fun() ->
+              rabbit_misc:execute_mnesia_transaction(fun() ->
+                                                             next_exchange_serial_in_mnesia(X)
+                                                     end)
+      end,
+      fun() ->
+              rabbit_khepri:transaction(fun() ->
+                                                next_exchange_serial_in_khepri(X)
+                                        end, rw)
+      end).
 
-next_exchange_serial(#exchange{name = XName}, mnesia) ->
-    execute_transaction(
-      fun() ->
-              Serial = peek_exchange_serial(XName, write, mnesia),
-              ok = mnesia:write(rabbit_exchange_serial,
-                                #exchange_serial{name = XName, next = Serial + 1}, write),
-              Serial
-      end, mnesia);
-next_exchange_serial(#exchange{name = XName}, khepri) ->
-    execute_transaction(
-      fun() ->
-              Path = khepri_exchange_serial_path(XName),
-              Extra = #{keep_while => #{khepri_exchange_path(XName) => #if_node_exists{exists = true}}},
-              Serial = case khepri_tx:get(Path) of
-                           {ok, #{Path := #{data := #exchange_serial{next = Serial0}}}} -> Serial0;
-                           _ -> 1
-                       end,
-              {ok, _} = khepri_tx:put(Path,
-                                      #exchange_serial{name = XName, next = Serial + 1},
-                                      Extra),
-              Serial
-      end, khepri).
+next_exchange_serial_in_mnesia(#exchange{name = XName}) ->
+    Serial = peek_exchange_serial(XName, write, mnesia),
+    ok = mnesia:write(rabbit_exchange_serial,
+                      #exchange_serial{name = XName, next = Serial + 1}, write),
+    Serial.
+
+next_exchange_serial_in_khepri(#exchange{name = XName}) ->
+    Path = khepri_exchange_serial_path(XName),
+    Extra = #{keep_while => #{khepri_exchange_path(XName) => #if_node_exists{exists = true}}},
+    Serial = case khepri_tx:get(Path) of
+                 {ok, #{Path := #{data := #exchange_serial{next = Serial0}}}} -> Serial0;
+                 _ -> 1
+             end,
+    {ok, _} = khepri_tx:put(Path,
+                            #exchange_serial{name = XName, next = Serial + 1},
+                            Extra),
+    Serial.
 
 update_exchange_in_mnesia(Name, Fun) ->
     Table = {rabbit_exchange, Name},
@@ -465,21 +467,6 @@ delete_binding(Binding) ->
               delete_binding_in_khepri(Binding)
       end).
 
--spec remove_transient_bindings_for_destination_in_mnesia(rabbit_types:binding_destination()) -> rabbit_binding:deletions().
-%% TODO to become internal when rabbit_amqqueue is migrated
-remove_transient_bindings_for_destination_in_mnesia(DstName) ->
-    remove_bindings_for_destination_in_mnesia(DstName, false, fun remove_transient_routes/1).
-
-%% TODO to become internal when rabbit_amqqueue is migrated
-remove_transient_bindings_for_destination_in_khepri(DstName) ->
-    TransientBindingsMap = match_destination_in_khepri(DstName, transient),
-    maps:foreach(fun(K, _V) -> khepri_tx:delete(K) end, TransientBindingsMap),
-    Bindings = maps:fold(fun(_, Set, Acc) ->
-                                 sets:to_list(Set) ++ Acc
-                         end, [], TransientBindingsMap),
-    rabbit_binding:group_bindings_fold(fun maybe_auto_delete_exchange_in_khepri/4,
-                                       lists:keysort(#binding.source, Bindings), false).
-
 %% Queues
 list_queues() ->
     rabbit_khepri:try_mnesia_or_khepri(
@@ -519,17 +506,28 @@ list_durable_queues_by_type(Type) ->
 
 list_queues(VHost) ->
     rabbit_khepri:try_mnesia_or_khepri(
-      fun() -> list_queues_with_possible_retry_in_mnesia(
-                 fun() ->
-                         Pattern = amqqueue:pattern_match_on_name(rabbit_misc:r(VHost, queue)),
-                         list_in_mnesia(rabbit_queue, Pattern)
-                 end)
+      fun() ->
+              list_queues_in_mnesia(VHost)
       end,
       fun() -> list_queues_with_possible_retry_in_khepri(
                  fun() ->
                          list_in_khepri(khepri_queues_path() ++ [VHost, ?STAR_STAR])
                  end)
       end).
+
+%% TODO to become internal, used by rabbit_policy
+list_queues_in_mnesia(VHost) ->
+    list_queues_with_possible_retry_in_mnesia(
+      fun() ->
+              Pattern = amqqueue:pattern_match_on_name(rabbit_misc:r(VHost, queue)),
+              list_in_mnesia(rabbit_queue, Pattern)
+      end).
+
+%% TODO to become internal, used by rabbit_policy
+list_queues_in_khepri_tx(VHostPath) ->
+    Path = khepri_queues_path(),
+    {ok, Map} = rabbit_khepri:tx_match_and_get_data(Path ++ [VHostPath, ?STAR_STAR]),
+    maps:values(Map).
 
 list_durable_queues(VHost) ->
     rabbit_khepri:try_mnesia_or_khepri(
@@ -582,6 +580,20 @@ internal_delete_queue(QueueName, OnlyDurable, Reason) ->
               internal_delete_queue_in_khepri(QueueName, OnlyDurable, Reason)
       end).
 
+delete_transient_queues(Queues) ->
+    rabbit_khepri:try_mnesia_or_khepri(
+      fun() ->
+              rabbit_misc:execute_mnesia_transaction(
+                fun () -> [{QName, delete_transient_queue_in_mnesia(QName)} || QName <- Queues] end
+               )
+      end,
+      fun() ->
+              rabbit_khepri:transaction(
+                fun() ->
+                        [{QName, delete_transient_queue_in_khepri(QName)} || QName <- Queues]
+                end, rw)
+      end).
+
 store_durable_queue(Q) ->
     rabbit_khepri:try_mnesia_or_khepri(
       fun() ->
@@ -619,6 +631,13 @@ lookup_queues(Names) when is_list(Names) ->
 lookup_queues(Name) ->
     lookup_queue(Name).
 
+lookup_durable_queues(Names) when is_list(Names) ->
+    rabbit_khepri:try_mnesia_or_khepri(
+      fun() -> lookup_many(rabbit_durable_queue, Names, mnesia) end,
+      fun() -> lookup_many(fun khepri_durable_queue_path/1, Names, khepri) end);
+lookup_durable_queues(Name) ->
+    lookup_durable_queue(Name).
+
 update_queue(Name, Fun) ->
     rabbit_khepri:try_mnesia_or_khepri(
       fun() -> rabbit_misc:execute_mnesia_transaction(
@@ -631,6 +650,125 @@ update_queue(Name, Fun) ->
                          update_queue_in_khepri(Name, Fun)
                  end, rw)
       end).
+
+store_queue(DurableQ, Q) ->
+    QName = amqqueue:get_name(Q),
+    rabbit_khepri:try_mnesia_or_khepri(
+      fun() ->
+              rabbit_misc:execute_mnesia_transaction(
+                fun () ->
+                        case ?amqqueue_is_durable(Q) of
+                            true ->
+                                ok = mnesia:write(rabbit_durable_queue, DurableQ, write);
+                            false ->
+                                ok
+                        end,
+                        ok = mnesia:write(rabbit_queue, Q, write)
+                end)
+      end,
+      fun() ->
+              Path = khepri_queue_path(QName),
+              DurablePath = khepri_durable_queue_path(QName),
+              rabbit_khepri:transaction(
+                fun() ->
+                        case ?amqqueue_is_durable(Q) of
+                            true ->
+                                store_in_khepri(DurablePath, DurableQ);
+                            false ->
+                                ok
+                        end,
+                        store_in_khepri(Path, Q)
+                end)
+      end).
+
+store_queue_without_recover(DurableQ, Q) ->
+    QueueName = amqqueue:get_name(Q),
+    rabbit_khepri:try_mnesia_or_khepri(
+      fun() ->
+              rabbit_misc:execute_mnesia_transaction(
+                fun () ->
+                        case mnesia:wread({rabbit_queue, QueueName}) of
+                            [] ->
+                                case not_found_or_absent_queue_in_mnesia(QueueName) of
+                                    not_found           ->
+                                        case ?amqqueue_is_durable(Q) of
+                                            true ->
+                                                ok = mnesia:write(rabbit_durable_queue, DurableQ, write);
+                                            false ->
+                                                ok
+                                        end,
+                                        ok = mnesia:write(rabbit_queue, Q, write),
+                                        {created, Q};
+                                    {absent, _Q, _} = R ->
+                                        R
+                                end;
+                            [ExistingQ] ->
+                                {existing, ExistingQ}
+                        end
+                end)
+      end,
+      fun() ->
+              Path = khepri_queue_path(QueueName),
+              DurablePath = khepri_durable_queue_path(QueueName),
+              rabbit_khepri:transaction(
+                fun() ->
+                        case khepri_tx:get(Path) of
+                            {ok, #{Path := #{data := ExistingQ}}} ->
+                                khepri_tx:abort({existing, ExistingQ});
+                            _ ->
+                                case not_found_or_absent_queue_in_khepri(QueueName) of
+                                    not_found ->
+                                        case ?amqqueue_is_durable(DurableQ) of
+                                            true ->
+                                                store_in_khepri(DurablePath, DurableQ);
+                                            false ->
+                                                ok
+                                        end,
+                                        store_in_khepri(Path, Q),
+                                        {created, DurableQ};
+                                    {absent, _, _} = R ->
+                                        khepri_tx:abort(R)
+                                end
+                        end
+                end)
+      end).
+
+store_queue_dirty(Q) ->
+    rabbit_khepri:try_mnesia_or_khepri(
+      fun() ->
+              ok = mnesia:dirty_write(rabbit_queue, rabbit_queue_decorator:set(Q))
+      end,
+      fun() ->
+              Path = khepri_queue_path(amqqueue:get_name(Q)),
+              case rabbit_khepri:put(Path, Q) of
+                  {ok, _} -> ok;
+                  Error -> throw(Error)
+              end
+      end).
+
+store_queues(Qs) ->
+    %% TODO only durable or both?
+    rabbit_khepri:try_mnesia_or_khepri(
+      fun() ->
+              rabbit_misc:execute_mnesia_transaction(
+                fun() ->
+                        [ok = mnesia:write(rabbit_durable_queue, Q, write) || Q <- Qs]
+                end)
+      end,
+      fun() ->
+              rabbit_khepri:transaction(
+                fun() ->
+                        [begin
+                             Path = khepri_durable_queue_path(amqqueue:get_name(Q)),
+                             store_in_khepri(Path, Q)
+                         end || Q <- Qs]
+                end)
+      end).
+
+update_queue_decorators(Name) ->
+    rabbit_khepri:try_mnesia_or_khepri(
+      fun() -> update_queue_decorators_in_mnesia(Name) end,
+      fun() -> update_queue_decorators_in_khepri(Name) end).
 
 %% Feature flags
 %% --------------------------------------------------------------
@@ -874,11 +1012,6 @@ create_exchange_in_khepri(Path, X) ->
             {existing, ExistingX}
     end.
 
-execute_transaction(TxFun, mnesia) ->
-    rabbit_misc:execute_mnesia_transaction(TxFun);
-execute_transaction(TxFun, khepri) ->
-    rabbit_khepri:transaction(TxFun, rw).
-
 execute_transaction(TxFun, PrePostCommitFun, mnesia) ->
     case mnesia:is_transaction() of
         true  -> throw(unexpected_transaction);
@@ -1066,23 +1199,66 @@ absent_errs_only_in_khepri(Names) ->
 not_found_or_absent_in_mnesia(#resource{kind = exchange} = Name) ->
     {not_found, Name};
 not_found_or_absent_in_mnesia(#resource{kind = queue}    = Name) ->
-    case rabbit_amqqueue:not_found_or_absent_in_mnesia(Name) of
+    case not_found_or_absent_queue_in_mnesia(Name) of
         not_found                 -> {not_found, Name};
         {absent, _Q, _Reason} = R -> R
+    end.
+
+not_found_or_absent_queue_in_mnesia(Name) ->
+    %% NB: we assume that the caller has already performed a lookup on
+    %% rabbit_queue and not found anything
+    case mnesia:read({rabbit_durable_queue, Name}) of
+        []  -> not_found;
+        [Q] -> {absent, Q, nodedown} %% Q exists on stopped node
     end.
 
 not_found_or_absent_in_khepri(#resource{kind = exchange} = Name) ->
     {not_found, Name};
 not_found_or_absent_in_khepri(#resource{kind = queue}    = Name) ->
-    case rabbit_amqqueue:not_found_or_absent_in_khepri(Name) of
+    case not_found_or_absent_queue_in_khepri(Name) of
         not_found                 -> {not_found, Name};
         {absent, _Q, _Reason} = R -> R
     end.
 
-serial(false, _, _) ->
+not_found_or_absent_queue_in_khepri(Name) ->
+    %% NB: we assume that the caller has already performed a lookup on
+    %% rabbit_queue and not found anything
+    Path = khepri_durable_queue_path(Name),
+    case khepri_tx:get(Path) of
+        {ok, #{Path := #{data := Q}}} -> {absent, Q, nodedown}; %% Q exists on stopped node
+        _  -> not_found
+    end.
+
+not_found_or_absent_queue_dirty(Name) ->
+    rabbit_khepri:try_mnesia_or_khepri(
+      fun() -> not_found_or_absent_queue_dirty_in_mnesia(Name) end,
+      fun() ->
+              %% This might hit khepri cache, vs a full transaction
+              Path = khepri_durable_queue_path(Name),
+              case rabbit_khepri:get_data(Path) of
+                  {ok, Q} -> {absent, Q, nodedown}; %% Q exists on stopped node
+                  _  -> not_found
+              end
+      end).
+
+not_found_or_absent_queue_dirty_in_mnesia(Name) ->
+    %% We should read from both tables inside a tx, to get a
+    %% consistent view. But the chances of an inconsistency are small,
+    %% and only affect the error kind.
+    case rabbit_misc:dirty_read({rabbit_durable_queue, Name}) of
+        {error, not_found} -> not_found;
+        {ok, Q}            -> {absent, Q, nodedown}
+    end.
+
+serial_in_mnesia(false, _) ->
     none;
-serial(true, X, Store) ->
-    next_exchange_serial(X, Store).
+serial_in_mnesia(true, X) ->
+    next_exchange_serial_in_mnesia(X).
+
+serial_in_khepri(false, _) ->
+    none;
+serial_in_khepri(true, X) ->
+    next_exchange_serial_in_khepri(X).
 
 bindings_data(Path, BindingType) ->
     case khepri_tx:get(Path) of
@@ -1127,7 +1303,7 @@ add_binding_in_mnesia(Binding, ChecksFun) ->
                                               fun mnesia:write/3),
                               rabbit_exchange:callback(Src, add_binding, transaction, [Src, Binding]),
                               MaybeSerial = rabbit_exchange:serialise_events(Src),
-                              Serial = serial(MaybeSerial, Src, mnesia),
+                              Serial = serial_in_mnesia(MaybeSerial, Src),
                               fun () ->
                                       rabbit_exchange:callback(Src, add_binding, Serial, [Src, Binding])
                               end;
@@ -1149,7 +1325,7 @@ add_binding_in_khepri(#binding{source = SrcName,
                     Serial = rabbit_khepri:transaction(
                                fun() ->
                                        add_binding_tx(Path, Binding, BindingType),
-                                       serial(MaybeSerial, Src, khepri)
+                                       serial_in_khepri(MaybeSerial, Src)
                                end, rw),
                     rabbit_exchange:callback(Src, add_binding, [transaction, Serial], [Src, Binding]),
                     ok;
@@ -1253,7 +1429,7 @@ remove_binding_in_khepri(#binding{source = SrcName,
                                        ok ->
                                            ok = delete_binding_in_khepri(Binding),
                                            ok = delete_routing(Binding),
-                                           maybe_auto_delete_exchange_in_khepri(#binding.source, [Binding], rabbit_binding:new_deletions(), false);
+                                           maybe_auto_delete_exchange_in_khepri(Binding#binding.source, [Binding], rabbit_binding:new_deletions(), false);
                                        {error, _} = Err ->
                                            Err
                                    end
@@ -1528,6 +1704,19 @@ remove_bindings_for_source_in_khepri(SrcName) ->
                       sets:to_list(Set) ++ Acc
               end, [], Bindings).
 
+-spec remove_transient_bindings_for_destination_in_mnesia(rabbit_types:binding_destination()) -> rabbit_binding:deletions().
+remove_transient_bindings_for_destination_in_mnesia(DstName) ->
+    remove_bindings_for_destination_in_mnesia(DstName, false, fun remove_transient_routes/1).
+
+remove_transient_bindings_for_destination_in_khepri(DstName) ->
+    TransientBindingsMap = match_destination_in_khepri(DstName, transient),
+    maps:foreach(fun(K, _V) -> khepri_tx:delete(K) end, TransientBindingsMap),
+    Bindings = maps:fold(fun(_, #{bindings := Set}, Acc) ->
+                                 sets:to_list(Set) ++ Acc
+                         end, [], TransientBindingsMap),
+    rabbit_binding:group_bindings_fold(fun maybe_auto_delete_exchange_in_khepri/4,
+                                       lists:keysort(#binding.source, Bindings), false).
+
 recover_bindings_in_mnesia() ->
     rabbit_misc:execute_mnesia_transaction(
         fun () ->
@@ -1547,7 +1736,7 @@ recover_semi_durable_route_txn(#route{binding = B} = Route, X, mnesia) ->
               case mnesia:read(rabbit_semi_durable_route, B, read) of
                   [] -> no_recover;
                   _  -> ok = sync_transient_route(Route, fun mnesia:write/3),
-                        serial(MaybeSerial, X, mnesia)
+                        serial_in_mnesia(MaybeSerial, X)
               end
       end,
       fun (no_recover, _) -> ok;
@@ -1561,7 +1750,7 @@ recover_semi_durable_route_txn(Path, X, khepri) ->
       fun () ->
               case khepri_tx:get(Path) of
                   {ok, #{Path := #{data := #{bindings := Set}}}} ->
-                      {serial(MaybeSerial, X, khepri), Set};
+                      {serial_in_khepri(MaybeSerial, X), Set};
                   _ ->
                       no_recover
               end
@@ -1700,6 +1889,14 @@ delete_queue_in_khepri(Name, Reason) ->
               end
       end, rw).
 
+delete_transient_queue_in_mnesia(QName) ->
+    ok = mnesia:delete({rabbit_queue, QName}),
+    remove_transient_bindings_for_destination_in_mnesia(QName).
+
+delete_transient_queue_in_khepri(QName) ->
+    {ok, _} = khepri_tx:delete(khepri_queue_path(QName)),
+    remove_transient_bindings_for_destination_in_khepri(QName).
+
 update_queue_in_mnesia(Name, Fun) ->
     case mnesia:wread({rabbit_queue, Name}) of
         [Q] ->
@@ -1732,4 +1929,43 @@ update_queue_in_khepri(Name, Fun) ->
             Q1;
         _  ->
             not_found
+    end.
+
+update_queue_decorators_in_mnesia(Name) ->
+    rabbit_misc:execute_mnesia_transaction(
+      fun() ->
+              case mnesia:wread({rabbit_queue, Name}) of
+                  [Q] -> ok = mnesia:write(rabbit_queue, rabbit_queue_decorators:set(Q), write);
+                  []  -> ok
+              end
+      end).
+
+update_queue_decorators_in_khepri(Name) ->
+    Path = khepri_queue_path(Name),
+    %% Decorators are stored on an ETS table, we need to query them before the transaction.
+    %% Also, to verify which ones are active could lead to any kind of side-effects.
+    %% Thus it needs to be done outside of the transaction
+    Decorators = case rabbit_khepri:get(Path) of
+                     {ok, #{Path := #{data := Q}}} ->
+                         rabbit_queue_decorator:active(Q);
+                     _ ->
+                         []
+                 end,
+    rabbit_khepri:transaction(
+      fun() ->
+              case khepri_tx:get(Path) of
+                  {ok, #{Path := #{data := Q0}}} ->
+                      Q1 = amqqueue:reset_mirroring_and_decorators(Q0),
+                      Q2 = amqqueue:set_decorators(Q1, Decorators),
+                      store_in_khepri(Path, Q2),
+                      ok;
+                  _  ->
+                      ok
+              end
+      end, rw).
+
+store_in_khepri(Path, Value) ->
+    case khepri_tx:put(Path, Value) of
+        {ok, _} -> ok;
+        Error   -> khepri_tx:abort(Error)
     end.

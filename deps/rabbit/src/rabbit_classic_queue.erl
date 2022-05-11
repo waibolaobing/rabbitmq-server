@@ -118,16 +118,10 @@ is_recoverable(Q) when ?is_amqqueue(Q) ->
      orelse not rabbit_mnesia:is_process_alive(amqqueue:get_pid(Q))).
 
 lookup_queue(Q) ->
-    rabbit_khepri:try_mnesia_or_khepri(
-      fun() ->
-              mnesia:read(rabbit_queue, amqqueue:get_name(Q), read) =:= []
-      end,
-      fun() ->
-              case rabbit_amqqueue:lookup_in_khepri(rabbit_queue, amqqueue:get_name(Q)) of
-                  {ok, _} -> false;
-                  _ -> true
-              end
-      end).
+    case rabbit_store:lookup_queue(amqqueue:get_name(Q)) of
+        {error, not_found} -> false;
+        {ok, _} -> true
+    end.
 
 recover(VHost, Queues) ->
     {ok, BQ} = application:get_env(rabbit, backing_queue_module),
