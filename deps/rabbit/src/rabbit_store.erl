@@ -39,9 +39,6 @@
 %% TODO used by topic exchange. Should it be internal?
 -export([match_source_and_destination_in_khepri/2]).
 
-%% TODO used by rabbit_router. It should become internal
--export([match_source_in_khepri/1, match_source_and_key_in_khepri/2]).
-
 -export([mnesia_write_route_to_khepri/1, mnesia_write_durable_route_to_khepri/1,
          mnesia_write_semi_durable_route_to_khepri/1, mnesia_write_reverse_route_to_khepri/1,
          clear_route_in_khepri/0]).
@@ -66,7 +63,7 @@
 -export([store_durable_queue/1]).
 
 %% TODO to become internal
--export([lookup_exchange_tx/2, list_exchanges_in_khepri_tx/1,
+-export([list_exchanges_in_khepri_tx/1,
          lookup_queue_in_khepri_tx/1]).
 
 %% Paths
@@ -186,12 +183,6 @@ lookup_many_exchanges(Names) ->
     rabbit_khepri:try_mnesia_or_khepri(
       fun() -> lookup_many(rabbit_exchange, Names, mnesia) end,
       fun() -> lookup_many(fun khepri_exchange_path/1, Names, khepri) end).
-
-%% TODO once bindings are moved here, this should be internal
-lookup_exchange_tx(Name, mnesia) ->
-    lookup_tx_in_mnesia({rabbit_exchange, Name});
-lookup_exchange_tx(Name, khepri) ->
-    lookup_tx_in_khepri(khepri_exchange_path(Name)).
 
 %% TODO rabbit_policy:update_matched_objects_in_khepri
 list_exchanges_in_khepri_tx(VHostPath) ->
