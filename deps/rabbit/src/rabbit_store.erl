@@ -31,8 +31,7 @@
          recover_bindings/0, recover_bindings/1, delete_binding/1]).
 
 %% TODO used by rabbit_policy, to become internal
--export([update_exchange_in_mnesia/2, update_exchange_in_khepri/2,
-         store_exchange_in_khepri/1]).
+-export([update_exchange_in_mnesia/2, update_exchange_in_khepri/2]).
 
 %% TODO used by rabbit policy. to become internal
 -export([list_exchanges_in_mnesia/1, list_queues_in_khepri_tx/1,
@@ -59,6 +58,9 @@
          clear_queue_data_in_khepri/0, clear_durable_queue_data_in_khepri/0,
          store_queue/2, store_queues/1, store_queue_without_recover/2,
          store_queue_dirty/1]).
+
+%% Routing. These functions are in the hot code path
+-export([match_bindings/2, match_routing_key/2]).
 
 %% TODO maybe refactor after queues are migrated.
 -export([store_durable_queue/1]).
@@ -289,7 +291,7 @@ store_durable_exchanges(Xs) ->
       fun() ->
               rabbit_khepri:transaction(
                 fun() ->
-                        [rabbit_store:store_exchange_in_khepri(X) || X <- Xs]
+                        [store_exchange_in_khepri(X) || X <- Xs]
                 end, rw)
       end).
 
@@ -769,6 +771,65 @@ update_queue_decorators(Name) ->
     rabbit_khepri:try_mnesia_or_khepri(
       fun() -> update_queue_decorators_in_mnesia(Name) end,
       fun() -> update_queue_decorators_in_khepri(Name) end).
+
+
+%% Routing - HOT CODE PATH
+
+match_bindings(SrcName, Match) ->
+    rabbit_khepri:try_mnesia_or_khepri(
+      fun() ->
+              MatchHead = #route{binding = #binding{source      = SrcName,
+                                                    _           = '_'}},
+              Routes = ets:select(rabbit_route, [{MatchHead, [], [['$_']]}]),
+              [Dest || [#route{binding = Binding = #binding{destination = Dest}}] <-
+                           Routes, Match(Binding)]
+      end,
+      fun() ->
+              Data = match_source_in_khepri(SrcName),
+              Bindings = lists:foldl(fun(#{bindings := SetOfBindings}, Acc) ->
+                                             sets:to_list(SetOfBindings) ++ Acc
+                                     end, [], maps:values(Data)),
+              [Dest || Binding = #binding{destination = Dest} <- Bindings, Match(Binding)]
+      end).
+
+match_routing_key(SrcName, [RoutingKey]) ->
+    rabbit_khepri:try_mnesia_or_khepri(
+      fun() ->
+              MatchHead = #route{binding = #binding{source      = SrcName,
+                                                    destination = '$1',
+                                                    key         = RoutingKey,
+                                                    _           = '_'}},
+              ets:select(rabbit_route, [{MatchHead, [], ['$1']}])
+      end,
+      fun() ->
+              match_source_and_key_in_khepri(SrcName, [RoutingKey])
+      end);
+match_routing_key(SrcName, [_|_] = RoutingKeys) ->
+    rabbit_khepri:try_mnesia_or_khepri(
+      fun() ->
+              %% Normally we'd call mnesia:dirty_select/2 here, but that is quite
+              %% expensive for the same reasons as above, and, additionally, due to
+              %% mnesia 'fixing' the table with ets:safe_fixtable/2, which is wholly
+              %% unnecessary. According to the ets docs (and the code in erl_db.c),
+              %% 'select' is safe anyway ("Functions that internally traverse over a
+              %% table, like select and match, will give the same guarantee as
+              %% safe_fixtable.") and, furthermore, even the lower level iterators
+              %% ('first' and 'next') are safe on ordered_set tables ("Note that for
+              %% tables of the ordered_set type, safe_fixtable/2 is not necessary as
+              %% calls to first/1 and next/2 will always succeed."), which
+              %% rabbit_route is.
+              MatchHead = #route{binding = #binding{source      = SrcName,
+                                                    destination = '$1',
+                                                    key         = '$2',
+                                                    _           = '_'}},
+              Conditions = [list_to_tuple(['orelse' | [{'=:=', '$2', RKey} ||
+                                                          RKey <- RoutingKeys]])],
+              ets:select(rabbit_route, [{MatchHead, Conditions, ['$1']}])
+      end,
+      fun() ->
+              match_source_and_key_in_khepri(SrcName, RoutingKeys)
+      end).
+
 
 %% Feature flags
 %% --------------------------------------------------------------
