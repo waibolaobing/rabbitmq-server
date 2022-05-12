@@ -7,7 +7,6 @@
 
 -module(rabbit_exchange_type_topic).
 
--include_lib("khepri/include/khepri.hrl").
 -include_lib("rabbit_common/include/rabbit.hrl").
 
 -behaviour(rabbit_exchange_type).
@@ -17,8 +16,6 @@
          create/2, delete/3, policy_changed/2, add_binding/3,
          remove_bindings/3, assert_args_equivalence/2]).
 -export([info/1, info/2]).
-
--export([clear_data_in_khepri/0, mnesia_write_to_khepri/1]).
 
 -rabbit_boot_step({?MODULE,
                    [{description, "exchange type topic"},
@@ -37,6 +34,12 @@ description() ->
 
 serialise_events() -> false.
 
+%% All mnesia and khepri code is being migrated to `rabbit_store` to act as a metadata
+%% store API. Mnesia support should be eventually removed and this move should minimise
+%% the impact on the wider codebase. Given the completely different and more complex
+%% implementation of the topic trie on Mnesia, I have decided that Mnesia code should remain here
+%% until it is removed to avoid polluting `rabbit_store`.
+%%
 %% NB: This may return duplicate results in some situations (that's ok)
 route(X, Delivery) ->
     rabbit_khepri:try_mnesia_or_khepri(
@@ -44,7 +47,7 @@ route(X, Delivery) ->
               route_in_mnesia(X, Delivery)
       end,
       fun() ->
-              route_in_khepri(X, Delivery)
+              route_delivery_for_exchange_type_topic(X, Delivery)
       end).
 
 validate(_X) -> ok.
@@ -54,7 +57,7 @@ create(_Tx, _X) -> ok.
 delete(transaction, #exchange{name = X}, _Bs) ->
     rabbit_khepri:try_mnesia_or_khepri(
       fun() -> delete_in_mnesia(X) end,
-      fun() -> delete_in_khepri(X) end);
+      fun() -> rabbit_store:delete_topic_trie_bindings_for_exchange(X) end);
 delete(none, _Exchange, _Bs) ->
     ok.
 
@@ -71,7 +74,7 @@ remove_bindings(transaction, _X, Bs) ->
               remove_bindings_in_mnesia(Bs)
       end,
       fun() ->
-              remove_bindings_in_khepri(Bs)
+              rabbit_store:delete_topic_trie_bindings(Bs)
       end);
 remove_bindings(none, _X, _Bs) ->
     ok.
@@ -101,60 +104,10 @@ remove_bindings_in_mnesia(Bs) ->
      end ||  #binding{source = X, key = K, destination = D, args = Args} <- Bs],
     ok.
 
-remove_bindings_in_khepri(Bs) ->
-    %% Let's handle bindings data outside of the transaction
-    Data = [begin
-                Path = khepri_exchange_type_topic_path(X) ++ split_topic_key_in_khepri(K),
-                {Path, #{destination => D, arguments => Args}}
-            end || #binding{source = X, key = K, destination = D, args = Args} <- Bs],
-    rabbit_khepri:transaction(
-      fun() ->
-              [begin
-                   case khepri_tx:get(Path) of
-                       {ok, #{Path := #{data := Set0,
-                                        child_list_length := Children}}} ->
-                           Set = sets:del_element(Binding, Set0),
-                           case {Children, sets:size(Set)} of
-                               {0, 0} ->
-                                   khepri_tx:delete(Path),
-                                   %% TODO can we use a keep_while condition?
-                                   remove_path_if_empty_in_khepri(lists:droplast(Path));
-                               _ ->
-                                   khepri_tx:put(Path, Set)
-                           end;
-                       _ ->
-                           ok
-                   end
-               end || {Path, Binding} <- Data]
-      end, rw),
-    ok.
-
-%% TODO use keepwhile instead?
-remove_path_if_empty_in_khepri([?MODULE, topic_trie_binding]) ->
-    ok;
-remove_path_if_empty_in_khepri(Path) ->
-    case khepri_tx:get(Path) of
-        {ok, #{Path := #{data := Set,
-                         child_list_length := Children}}} ->
-            case {Children, sets:size(Set)} of
-                {0, 0} ->
-                    khepri_tx:delete(Path),
-                    remove_path_if_empty_in_khepri(lists:droplast(Path));
-                _ ->
-                    ok
-            end;
-        _ ->
-            ok
-    end.
-
 delete_in_mnesia(X) ->
     trie_remove_all_nodes(X),
     trie_remove_all_edges(X),
     trie_remove_all_bindings(X),
-    ok.
-
-delete_in_khepri(X) ->
-    {ok, _} = rabbit_khepri:delete(khepri_exchange_type_topic_path(X)),
     ok.
 
 internal_add_binding(#binding{source = X, key = K, destination = D, args = Args}) ->
@@ -164,24 +117,7 @@ internal_add_binding(#binding{source = X, key = K, destination = D, args = Args}
               trie_add_binding(X, FinalNode, D, Args),
               ok
       end,
-      fun () -> internal_add_binding_in_khepri(X, K, D, Args) end).
-
-internal_add_binding_in_khepri(X, K, D, Args) ->
-    Path = khepri_exchange_type_topic_path(X) ++ split_topic_key_in_khepri(K),
-    Binding = #{destination => D, arguments => Args},
-    rabbit_khepri:transaction(
-      fun() ->
-              Set0 = case khepri_tx:get(Path) of
-                         {ok, #{Path := #{data := S}}} -> S;
-                         _ -> sets:new()
-                     end,
-              Set = sets:add_element(Binding, Set0),
-              {ok, _} = khepri_tx:put(Path, Set),
-              ok
-      end, rw).
-
-khepri_exchange_type_topic_path(#resource{virtual_host = VHost, name = Name}) ->
-    [?MODULE, topic_trie_binding, VHost, Name].
+      fun () -> rabbit_store:add_topic_trie_binding(X, K, D, Args) end).
 
 route_in_mnesia(#exchange{name = X},
                 #delivery{message = #basic_message{routing_keys = Routes}}) ->
@@ -190,35 +126,11 @@ route_in_mnesia(#exchange{name = X},
                       mnesia:async_dirty(fun trie_match/2, [X, Words])
                   end || RKey <- Routes]).
 
-route_in_khepri(#exchange{name = X},
-                #delivery{message = #basic_message{routing_keys = Routes}}) ->
+route_delivery_for_exchange_type_topic(#exchange{name = XName},
+                                       #delivery{message = #basic_message{routing_keys = Routes}}) ->
     lists:append([begin
-                      Words = khepri_topic_match(split_topic_key_in_khepri(RKey)),
-                      Root = khepri_exchange_type_topic_path(X),
-                      Path = Root ++ Words,
-                      Fanout = Root ++ [<<"#">>],
-                      Map = rabbit_khepri:transaction(
-                              fun() ->
-                                      case khepri_tx:get(Fanout, #{expect_specific_node => true}) of
-                                          {ok, #{Fanout := #{data := _}} = Map} ->
-                                              Map;
-                                          _ ->
-                                              case khepri_tx:get(Path) of
-                                                  {ok, Map} -> Map;
-                                                  _ -> #{}
-                                              end
-                                      end
-                              end, ro),
-                      maps:fold(fun(_, #{data := Data}, Acc) ->
-                                        Bindings = sets:to_list(Data),
-                                        [maps:get(destination, B) || B <- Bindings] ++ Acc;
-                                   (_, _, Acc) ->
-                                        Acc
-                                end, [], Map)
+                      rabbit_store:route_delivery_for_exchange_type_topic(XName, RKey)
                   end || RKey <- Routes]).
-
-khepri_topic_match(Words) ->
-    lists:map(fun(W) -> #if_any{conditions = [W, <<"*">>]} end, Words).
 
 trie_match(X, Words) ->
     trie_match(X, root, Words, []).
@@ -381,10 +293,6 @@ new_node_id() ->
 split_topic_key(Key) ->
     split_topic_key(Key, [], []).
 
-split_topic_key_in_khepri(Key) ->
-    Words = split_topic_key(Key, [], []),
-    [list_to_binary(W) || W <- Words].
-
 split_topic_key(<<>>, [], []) ->
     [];
 split_topic_key(<<>>, RevWordAcc, RevResAcc) ->
@@ -393,26 +301,3 @@ split_topic_key(<<$., Rest/binary>>, RevWordAcc, RevResAcc) ->
     split_topic_key(Rest, [], [lists:reverse(RevWordAcc) | RevResAcc]);
 split_topic_key(<<C:8, Rest/binary>>, RevWordAcc, RevResAcc) ->
     split_topic_key(Rest, [C | RevWordAcc], RevResAcc).
-
-clear_data_in_khepri() ->
-    Path = [?MODULE, topic_trie_binding],
-    case rabbit_khepri:delete(Path) of
-        {ok, _} -> ok;
-        Error -> throw(Error)
-    end.
-
-mnesia_write_to_khepri(#topic_trie_binding{trie_binding = #trie_binding{exchange_name = X,
-                                                                        destination   = D}}) ->
-    %% There isn't enough information to rebuild the tree as the routing key is split
-    %% along the trie tree on mnesia. But, we can query the bindings table (migrated
-    %% previosly) and migrate the entries that match this <X, D> combo
-    %% We'll probably update multiple times the bindings that differ only on the arguments,
-    %% but that is fine. Migration happens only once, so it is better to do a bit more of work
-    %% than skipping bindings because out of order arguments.
-    Values = rabbit_store:match_source_and_destination_in_khepri(X, D),
-    Bindings = lists:foldl(fun(#{bindings := SetOfBindings}, Acc) ->
-                                   sets:to_list(SetOfBindings) ++ Acc
-                           end, [], Values),
-    [internal_add_binding_in_khepri(X, K, D, Args) || #binding{key = K,
-                                                               args = Args} <- Bindings],
-    ok.

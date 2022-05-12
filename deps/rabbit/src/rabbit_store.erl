@@ -64,6 +64,11 @@
 
 -export([mnesia_write_listener_to_khepri/1, clear_listener_data_in_khepri/0]).
 
+-export([add_topic_trie_binding/4, delete_topic_trie_bindings_for_exchange/1,
+         delete_topic_trie_bindings/1, route_delivery_for_exchange_type_topic/2]).
+
+-export([clear_topic_trie_binding_data_in_khepri/0, mnesia_write_topic_trie_binding_to_khepri/1]).
+
 %% TODO maybe refactor after queues are migrated.
 -export([store_durable_queue/1]).
 
@@ -129,6 +134,9 @@ khepri_listener_path(Node) ->
 
 khepri_listeners_path() ->
     [?MODULE, listeners].
+
+khepri_exchange_type_topic_path(#resource{virtual_host = VHost, name = Name}) ->
+    [?MODULE, topic_trie_binding, VHost, Name].
 
 %% API
 %% --------------------------------------------------------------
@@ -922,6 +930,79 @@ list_listeners(Node, Protocol) ->
               end
       end).
 
+
+%% Exchange type topic
+add_topic_trie_binding(XName, RoutingKey, Destination, Args) ->
+    Path = khepri_exchange_type_topic_path(XName) ++ split_topic_trie_key(RoutingKey),
+    Binding = #{destination => Destination, arguments => Args},
+    rabbit_khepri:transaction(
+      fun() ->
+              Set0 = case khepri_tx:get(Path) of
+                         {ok, #{Path := #{data := S}}} -> S;
+                         _ -> sets:new()
+                     end,
+              Set = sets:add_element(Binding, Set0),
+              {ok, _} = khepri_tx:put(Path, Set),
+              ok
+      end, rw).
+
+route_delivery_for_exchange_type_topic(XName, RoutingKey) ->
+    Words = lists:map(fun(W) -> #if_any{conditions = [W, <<"*">>]} end,
+                      split_topic_trie_key(RoutingKey)),
+    Root = khepri_exchange_type_topic_path(XName),
+    Path = Root ++ Words,
+    Fanout = Root ++ [<<"#">>],
+    Map = rabbit_khepri:transaction(
+            fun() ->
+                    case khepri_tx:get(Fanout, #{expect_specific_node => true}) of
+                        {ok, #{Fanout := #{data := _}} = Map} ->
+                            Map;
+                        _ ->
+                            case khepri_tx:get(Path) of
+                                {ok, Map} -> Map;
+                                _ -> #{}
+                            end
+                    end
+            end, ro),
+    maps:fold(fun(_, #{data := Data}, Acc) ->
+                      Bindings = sets:to_list(Data),
+                      [maps:get(destination, B) || B <- Bindings] ++ Acc;
+                 (_, _, Acc) ->
+                      Acc
+              end, [], Map).
+
+delete_topic_trie_bindings_for_exchange(XName) ->
+    {ok, _} = rabbit_khepri:delete(khepri_exchange_type_topic_path(XName)),
+    ok.
+
+delete_topic_trie_bindings(Bs) ->
+    %% Let's handle bindings data outside of the transaction for efficiency
+    Data = [begin
+                Path = khepri_exchange_type_topic_path(X) ++ split_topic_trie_key(K),
+                {Path, #{destination => D, arguments => Args}}
+            end || #binding{source = X, key = K, destination = D, args = Args} <- Bs],
+    rabbit_khepri:transaction(
+      fun() ->
+              [begin
+                   case khepri_tx:get(Path) of
+                       {ok, #{Path := #{data := Set0,
+                                        child_list_length := Children}}} ->
+                           Set = sets:del_element(Binding, Set0),
+                           case {Children, sets:size(Set)} of
+                               {0, 0} ->
+                                   khepri_tx:delete(Path),
+                                   %% TODO can we use a keep_while condition?
+                                   remove_path_if_empty(lists:droplast(Path));
+                               _ ->
+                                   khepri_tx:put(Path, Set)
+                           end;
+                       _ ->
+                           ok
+                   end
+               end || {Path, Binding} <- Data]
+      end, rw),
+    ok.
+
 %% Feature flags
 %% --------------------------------------------------------------
 
@@ -1064,6 +1145,30 @@ clear_listener_data_in_khepri() ->
         {ok, _} -> ok;
         Error -> throw(Error)
     end.
+
+clear_topic_trie_binding_data_in_khepri() ->
+    Path = [?MODULE, topic_trie_binding],
+    case rabbit_khepri:delete(Path) of
+        {ok, _} -> ok;
+        Error -> throw(Error)
+    end.
+
+mnesia_write_topic_trie_binding_to_khepri(
+  #topic_trie_binding{trie_binding = #trie_binding{exchange_name = X,
+                                                   destination   = D}}) ->
+    %% There isn't enough information to rebuild the tree as the routing key is split
+    %% along the trie tree on mnesia. But, we can query the bindings table (migrated
+    %% previosly) and migrate the entries that match this <X, D> combo
+    %% We'll probably update multiple times the bindings that differ only on the arguments,
+    %% but that is fine. Migration happens only once, so it is better to do a bit more of work
+    %% than skipping bindings because out of order arguments.
+    Values = rabbit_store:match_source_and_destination_in_khepri(X, D),
+    Bindings = lists:foldl(fun(#{bindings := SetOfBindings}, Acc) ->
+                                   sets:to_list(SetOfBindings) ++ Acc
+                           end, [], Values),
+    [add_topic_trie_binding(X, K, D, Args) || #binding{key = K,
+                                                       args = Args} <- Bindings],
+    ok.
 
 %% Internal
 %% --------------------------------------------------------------
@@ -2146,3 +2251,34 @@ add_listener_in_khepri(#listener{node = Node} = Listener) ->
                   Error -> khepri_tx:abort(Error)
               end
       end).
+
+split_topic_trie_key(Key) ->
+    Words = split_topic_trie_key(Key, [], []),
+    [list_to_binary(W) || W <- Words].
+
+split_topic_trie_key(<<>>, [], []) ->
+    [];
+split_topic_trie_key(<<>>, RevWordAcc, RevResAcc) ->
+    lists:reverse([lists:reverse(RevWordAcc) | RevResAcc]);
+split_topic_trie_key(<<$., Rest/binary>>, RevWordAcc, RevResAcc) ->
+    split_topic_trie_key(Rest, [], [lists:reverse(RevWordAcc) | RevResAcc]);
+split_topic_trie_key(<<C:8, Rest/binary>>, RevWordAcc, RevResAcc) ->
+    split_topic_trie_key(Rest, [C | RevWordAcc], RevResAcc).
+
+%% TODO use keepwhile instead?
+remove_path_if_empty([?MODULE, _]) ->
+    ok;
+remove_path_if_empty(Path) ->
+    case khepri_tx:get(Path) of
+        {ok, #{Path := #{data := Set,
+                         child_list_length := Children}}} ->
+            case {Children, sets:size(Set)} of
+                {0, 0} ->
+                    khepri_tx:delete(Path),
+                    remove_path_if_empty(lists:droplast(Path));
+                _ ->
+                    ok
+            end;
+        _ ->
+            ok
+    end.
