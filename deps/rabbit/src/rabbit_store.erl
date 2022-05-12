@@ -59,6 +59,11 @@
 %% Routing. These functions are in the hot code path
 -export([match_bindings/2, match_routing_key/2]).
 
+-export([add_listener/1, list_listeners/1, list_listeners/2,
+         delete_listener/1, delete_listeners/1]).
+
+-export([mnesia_write_listener_to_khepri/1, clear_listener_data_in_khepri/0]).
+
 %% TODO maybe refactor after queues are migrated.
 -export([store_durable_queue/1]).
 
@@ -117,6 +122,13 @@ khepri_durable_queues_path() ->
 
 khepri_durable_queue_path(#resource{virtual_host = VHost, name = Name}) ->
     [?MODULE, durable_queues, VHost, Name].
+
+%% Listeners
+khepri_listener_path(Node) ->
+    [?MODULE, listeners, Node].
+
+khepri_listeners_path() ->
+    [?MODULE, listeners].
 
 %% API
 %% --------------------------------------------------------------
@@ -821,6 +833,94 @@ match_routing_key(SrcName, [_|_] = RoutingKeys) ->
               match_source_and_key_in_khepri(SrcName, RoutingKeys)
       end).
 
+%% Listeners
+add_listener(Listener) ->
+    rabbit_khepri:try_mnesia_or_khepri(
+      fun() ->
+              ok = mnesia:dirty_write(rabbit_listener, Listener)
+      end,
+      fun() -> add_listener_in_khepri(Listener) end).
+
+list_listeners(Node) ->
+    rabbit_khepri:try_mnesia_or_khepri(
+      fun() ->
+              mnesia:dirty_read(rabbit_listener, Node)
+      end,
+      fun() ->
+              case rabbit_khepri:get_data(khepri_listener_path(Node)) of
+                  {ok, Set} -> sets:to_list(Set);
+                  _ -> []
+              end
+      end).
+
+delete_listeners(Node) ->
+    rabbit_khepri:try_mnesia_or_khepri(
+      fun() ->
+              ok = mnesia:dirty_delete(rabbit_listener, Node)
+      end,
+      fun() ->
+              rabbit_khepri:delete(khepri_listener_path(Node))
+      end).
+
+delete_listener(#listener{node = Node} = Listener) ->
+    rabbit_khepri:try_mnesia_or_khepri(
+      fun() ->
+              ok = mnesia:dirty_delete_object(rabbit_listener, Listener)
+      end,
+      fun() ->
+              rabbit_khepri:transaction(
+                fun() ->
+                        Path = khepri_listener_path(Node),
+                        case khepri_tx:get_data(Listener) of
+                            {ok, Set0} ->
+                                Set = sets:del_element(Listener, Set0),
+                                case sets:is_empty(Set) of
+                                    true ->
+                                        case khepri_tx:delete(Path) of
+                                            {ok, _} -> ok;
+                                            Error -> khepri_tx:abort(Error)
+                                        end;
+                                    false ->
+                                        case khepri_tx:put(Path, Set) of
+                                            {ok, _} -> ok;
+                                            Error -> khepri_tx:abort(Error)
+                                        end
+                                end;
+                            _ ->
+                                ok
+                        end
+                end)
+      end).
+
+list_listeners(Node, Protocol) ->
+    rabbit_khepri:try_mnesia_or_khepri(
+      fun() ->
+              rabbit_misc:execute_mnesia_transaction(
+                fun() ->
+                        MatchSpec = #listener{
+                                       node = Node,
+                                       protocol = Protocol,
+                                       _ = '_'
+                                      },
+                        case mnesia:match_object(rabbit_listener, MatchSpec, read) of
+                            []    -> undefined;
+                            [Row] -> Row
+                        end
+                end)
+      end,
+      fun() ->
+              Path = khepri_listener_path(Node),
+              {ok, Set} = rabbit_khepri:get_data(Path),
+              Ls = sets:fold(fun(#listener{protocol = P} = Listener, Acc) when P == Protocol ->
+                                     [Listener | Acc];
+                                (_, Acc) ->
+                                     Acc
+                             end, [], Set),
+              case Ls of
+                  [] -> undefined;
+                  [L] -> L
+              end
+      end).
 
 %% Feature flags
 %% --------------------------------------------------------------
@@ -950,6 +1050,16 @@ clear_queue_data_in_khepri() ->
 
 clear_durable_queue_data_in_khepri() ->
     Path = khepri_durable_queues_path(),
+    case rabbit_khepri:delete(Path) of
+        {ok, _} -> ok;
+        Error -> throw(Error)
+    end.
+
+mnesia_write_listener_to_khepri(Listener) ->
+    add_listener_in_khepri(Listener).
+
+clear_listener_data_in_khepri() ->
+    Path = khepri_listeners_path(),
     case rabbit_khepri:delete(Path) of
         {ok, _} -> ok;
         Error -> throw(Error)
@@ -2021,3 +2131,18 @@ store_in_khepri(Path, Value) ->
         {ok, _} -> ok;
         Error   -> khepri_tx:abort(Error)
     end.
+
+add_listener_in_khepri(#listener{node = Node} = Listener) ->
+    rabbit_khepri:transaction(
+      fun() ->
+              Path = khepri_listener_path(Node),
+              Set0 = case khepri_tx:get(Path) of
+                         {ok, #{Path := #{data := S}}} -> S;
+                         _ -> sets:new()
+                     end,
+              Set = sets:add_element(Listener, Set0),
+              case khepri_tx:put(Path, Set) of
+                  {ok, _} -> ok;
+                  Error -> khepri_tx:abort(Error)
+              end
+      end).

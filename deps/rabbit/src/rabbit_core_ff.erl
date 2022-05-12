@@ -558,7 +558,7 @@ clear_data_from_previous_attempt(
     clear_data_from_previous_attempt(FeatureName, Rest);
 clear_data_from_previous_attempt(
   FeatureName, [rabbit_listener | Rest]) ->
-    ok = rabbit_networking:clear_data_in_khepri(),
+    ok = rabbit_store:clear_listener_data_in_khepri(),
     clear_data_from_previous_attempt(FeatureName, Rest);
 clear_data_from_previous_attempt(_, []) ->
     ok.
@@ -672,7 +672,7 @@ copy_from_mnesia_to_khepri(
     copy_from_mnesia_to_khepri(FeatureName, Rest);
 copy_from_mnesia_to_khepri(
   FeatureName, [rabbit_listener = Table | Rest]) ->
-    Fun = fun rabbit_networking:mnesia_write_to_khepri/1,
+    Fun = fun rabbit_store:mnesia_write_listener_to_khepri/1,
     do_copy_from_mnesia_to_khepri(FeatureName, Table, Fun),
     copy_from_mnesia_to_khepri(FeatureName, Rest);
 copy_from_mnesia_to_khepri(_, []) ->
