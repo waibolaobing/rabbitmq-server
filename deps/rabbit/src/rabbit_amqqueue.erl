@@ -1551,8 +1551,8 @@ internal_delete(QueueName, ActingUser, Reason) ->
     case rabbit_store:delete_queue(QueueName, Reason) of
         ok ->
             ok;
-        {Deletions, Tag} ->
-            rabbit_binding:process_deletions(Deletions, Tag),
+        Deletions ->
+            rabbit_binding:process_deletions(Deletions, false),
             rabbit_binding:notify_deletions(Deletions, ?INTERNAL_USER),
             rabbit_core_metrics:queue_deleted(QueueName),
             ok = rabbit_event:notify(queue_deleted,
@@ -1741,22 +1741,35 @@ maybe_clear_recoverable_node(Node, Q) ->
 -spec on_node_down(node()) -> 'ok'.
 
 on_node_down(Node) ->
-    {Time, {QueueNames, QueueDeletions}} = timer:tc(fun() -> delete_queues_on_node_down(Node) end),
+    {Time, {QueueNames, Deletions}} = timer:tc(fun() -> delete_queues_on_node_down(Node) end),
     case length(QueueNames) of
         0 -> ok;
         _ -> rabbit_log:info("~p transient queues from an old incarnation of node ~p deleted in ~fs", [length(QueueNames), Node, Time/1000000])
     end,
-    notify_queue_binding_deletions(QueueDeletions),
+    notify_queue_binding_deletions(Deletions),
     rabbit_core_metrics:queues_deleted(QueueNames),
     notify_queues_deleted(QueueNames),
     ok.
+
+notify_queue_binding_deletions(QueueDeletions) when is_list(QueueDeletions) ->
+    Deletions = rabbit_binding:process_deletions(
+                  lists:foldl(fun rabbit_binding:combine_deletions/2,
+                              rabbit_binding:new_deletions(),
+                              QueueDeletions), false),
+    rabbit_binding:notify_deletions(Deletions, ?INTERNAL_USER);
+notify_queue_binding_deletions(QueueDeletions) ->
+    Deletions = rabbit_binding:process_deletions(QueueDeletions, false),
+    rabbit_binding:notify_deletions(Deletions, ?INTERNAL_USER).
 
 delete_queues_on_node_down(Node) ->
     %% TODO partitions are probably not necessary for Khepri, but leave it like this until we
     %% do more testing
     Partitions = partition_queues(queues_to_delete_when_node_down(Node)),
     lists:unzip(lists:flatten(
-                  [rabbit_store:delete_transient_queues(Queues) || Queues <- Partitions]
+                  [case rabbit_store:delete_transient_queues(Queues) of
+                       {error, noproc} -> [];
+                       Value -> Value
+                   end || Queues <- Partitions]
                  )).
 
 % If there are many queues and we delete them all in a single Mnesia transaction,
@@ -1785,20 +1798,6 @@ queues_to_delete_when_node_down(NodeDown) ->
                                 Acc
                         end
                 end, [], Qs).
-
-notify_queue_binding_deletions(QueueDeletions) ->
-    rabbit_misc:execute_mnesia_transaction(
-      fun() ->
-              Deletions = rabbit_binding:process_deletions(
-                            lists:foldl(
-                              fun rabbit_binding:combine_deletions/2,
-                              rabbit_binding:new_deletions(),
-                              QueueDeletions
-                             ),
-                            true),
-              rabbit_binding:notify_deletions(Deletions, ?INTERNAL_USER)
-      end
-     ).
 
 notify_queues_deleted(QueueDeletions) ->
     lists:foreach(

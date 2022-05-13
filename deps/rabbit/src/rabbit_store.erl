@@ -597,13 +597,16 @@ delete_transient_queues(Queues) ->
     rabbit_khepri:try_mnesia_or_khepri(
       fun() ->
               rabbit_misc:execute_mnesia_transaction(
-                fun () -> [{QName, delete_transient_queue_in_mnesia(QName)} || QName <- Queues] end
-               )
+                fun () ->
+                        [{QName, rabbit_binding:process_deletions(delete_transient_queue_in_mnesia(QName), true)}
+                         || QName <- Queues]
+                end)
       end,
       fun() ->
               rabbit_khepri:transaction(
                 fun() ->
-                        [{QName, delete_transient_queue_in_khepri(QName)} || QName <- Queues]
+                        [{QName, delete_transient_queue_in_khepri(QName)}
+                         || QName <- Queues]
                 end, rw)
       end).
 
@@ -867,7 +870,12 @@ delete_listeners(Node) ->
               ok = mnesia:dirty_delete(rabbit_listener, Node)
       end,
       fun() ->
-              rabbit_khepri:delete(khepri_listener_path(Node))
+              %% TODO this can return {error, nodedown} if the new leader hasn't been
+              %% elected after a rabbit node is down. What do we do?
+              %% Inspect logs for bindings_SUITE:khepri_cluster:transient_queue_on_node_down
+              %% The testcase succeeds, but one of the node has an internal crash
+              {ok, _} = rabbit_khepri:delete(khepri_listener_path(Node)),
+              ok
       end).
 
 delete_listener(#listener{node = Node} = Listener) ->
@@ -1300,7 +1308,7 @@ execute_khepri_transaction(TxFun, PostCommitFun) ->
     PostCommitFun(rabbit_khepri:transaction(
                     fun () ->
                             TxFun()
-                    end, rw), all).
+                    end, rw), false).
 
 delete_exchange_fun(Name, IfUnused, PrePostCommitFun, mnesia) ->
     fun() ->
@@ -1710,7 +1718,7 @@ remove_binding_in_khepri(#binding{source = SrcName,
         {error, _} = Err ->
             Err;
         Deletions ->
-            rabbit_binding:process_deletions(Deletions, all)
+            rabbit_binding:process_deletions(Deletions, false)
     end.
 
 maybe_auto_delete_exchange_in_mnesia(XName, Bindings, Deletions, OnlyDurable) ->
@@ -2140,7 +2148,7 @@ delete_queue_in_mnesia(QueueName, Reason) ->
                   _ ->
                       Deletions0 = internal_delete_queue_in_mnesia(QueueName, false, Reason),
                       Deletions = rabbit_binding:process_deletions(Deletions0, true),
-                      {Deletions, false}
+                      Deletions
               end
       end).
 
@@ -2152,7 +2160,7 @@ delete_queue_in_khepri(Name, Reason) ->
                   {[], []} ->
                       ok;
                   _ ->
-                      {internal_delete_queue_in_khepri(Name, false, Reason), all}
+                      internal_delete_queue_in_khepri(Name, false, Reason)
               end
       end, rw).
 
