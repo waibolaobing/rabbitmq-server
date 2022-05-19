@@ -29,69 +29,97 @@
 
 all() ->
     [
-      {group, without_automatic_setup},
-      {group, channel_use_mode_single},
-      {group, without_disambiguate},
-      {group, with_disambiguate}
+     {group, mnesia_store},
+     {group, khepri_store}
     ].
 
 groups() ->
     [
-      {without_automatic_setup, [], [
-          message_cycle_detection_case2
-      ]},
-      {without_disambiguate, [], [
-          {cluster_size_1, [], [
-              simple,
-              multiple_upstreams,
-              multiple_upstreams_pattern,
-              multiple_uris,
-              multiple_downstreams,
-              e2e,
-              unbind_on_delete,
-              unbind_on_unbind,
-              unbind_gets_transmitted,
-              no_loop,
-              dynamic_reconfiguration,
-              dynamic_reconfiguration_integrity,
-              federate_unfederate,
-              dynamic_plugin_stop_start,
-              dynamic_plugin_cleanup_stop_start,
-              dynamic_policy_cleanup,
-              delete_federated_exchange_upstream,
-              delete_federated_queue_upstream
-            ]}
-        ]},
-      {with_disambiguate, [], [
-          {cluster_size_2, [], [
-              user_id,
-              message_cycle_detection_case1,
-              restart_upstream
-            ]},
-          {cluster_size_3, [], [
-              max_hops,
-              binding_propagation
-            ]},
+     {mnesia_store, [], [{without_automatic_setup, [], [
+                                                        message_cycle_detection_case2
+                                                       ]},
+                         {without_disambiguate, [], [
+                                                     {cluster_size_1, [], cluster_size_1_tests()}
+                                                    ]},
+                         {with_disambiguate, [], [
+                                                  {cluster_size_2, [], without_disambiguate_cluster_size_2_tests()},
+                                                  {cluster_size_3, [], without_disambiguate_cluster_size_3_tests()},
+                                                  {without_plugins, [], [
+                                                                         {cluster_size_2, [], without_plugins_tests()}
+                                                                        ]}
+                                                 ]},
+                         {channel_use_mode_single, [], channel_use_mode_single_tests()}
+                        ]},
+     {khepri_store, [], [{without_automatic_setup, [], [
+                                                        message_cycle_detection_case2
+                                                       ]},
+                         {without_disambiguate, [], [
+                                                     {cluster_size_1, [], cluster_size_1_tests()}
+                                                    ]},
+                         {with_disambiguate, [], [
+                                                  {cluster_size_2, [], without_disambiguate_cluster_size_2_tests()},
+                                                  {cluster_size_3, [], without_disambiguate_cluster_size_3_tests()},
+                                                  {without_plugins, [], [
+                                                                         {cluster_size_2, [], without_plugins_tests()}
+                                                                        ]}
+                                                 ]},
+                         {channel_use_mode_single, [], channel_use_mode_single_tests()}
+                        ]}
+    ].
 
-          {without_plugins, [], [
-              {cluster_size_2, [], [
-                  upstream_has_no_federation
-                ]}
-            ]}
-        ]},
-        {channel_use_mode_single, [], [
-            simple,
-            single_channel_mode,
-            multiple_upstreams,
-            multiple_upstreams_pattern,
-            multiple_uris,
-            multiple_downstreams,
-            e2e,
-            unbind_on_delete,
-            unbind_on_unbind,
-            unbind_gets_transmitted,
-            federate_unfederate
-        ]}
+cluster_size_1_tests() ->
+    [
+     simple,
+     multiple_upstreams,
+     multiple_upstreams_pattern,
+     multiple_uris,
+     multiple_downstreams,
+     e2e,
+     unbind_on_delete,
+     unbind_on_unbind,
+     unbind_gets_transmitted,
+     no_loop,
+     dynamic_reconfiguration,
+     dynamic_reconfiguration_integrity,
+     federate_unfederate,
+     dynamic_plugin_stop_start,
+     dynamic_plugin_cleanup_stop_start,
+     dynamic_policy_cleanup,
+     delete_federated_exchange_upstream,
+     delete_federated_queue_upstream
+    ].
+
+without_disambiguate_cluster_size_2_tests() ->
+    [
+     user_id,
+     message_cycle_detection_case1,
+     restart_upstream
+    ].
+
+without_disambiguate_cluster_size_3_tests() ->
+    [
+     max_hops,
+     binding_propagation
+    ].
+
+without_plugins_tests() ->
+    [
+     upstream_has_no_federation
+    ].
+
+channel_use_mode_single_tests() ->
+    [
+     simple,
+     single_channel_mode,
+     multiple_upstreams,
+     multiple_upstreams_pattern,
+     multiple_uris,
+     multiple_downstreams,
+     e2e,
+     unbind_on_delete,
+     unbind_on_unbind,
+     unbind_gets_transmitted,
+     federate_unfederate
     ].
 
 suite() ->
@@ -108,6 +136,10 @@ init_per_suite(Config) ->
 end_per_suite(Config) ->
     rabbit_ct_helpers:run_teardown_steps(Config).
 
+init_per_group(mnesia_store, Config) ->
+    rabbit_ct_helpers:set_config(Config, [{metadata_store, mnesia}]);
+init_per_group(khepri_store, Config) ->
+    rabbit_ct_helpers:set_config(Config, [{metadata_store, khepri}]);
 %% Some of the "regular" tests but in the single channel mode.
 init_per_group(channel_use_mode_single, Config) ->
     SetupFederation = [
@@ -178,6 +210,10 @@ init_per_group1(Group, Config) ->
       rabbit_ct_client_helpers:setup_steps() ++
       SetupFederation ++ Disambiguate).
 
+end_per_group(mnesia_store, Config) ->
+    Config;
+end_per_group(khepri_store, Config) ->
+    Config;
 end_per_group(without_disambiguate, Config) ->
     Config;
 end_per_group(with_disambiguate, Config) ->
@@ -1286,7 +1322,7 @@ await_binding(_Config, _Node, _Vhost, _X, _Key, ExpectedBindingCount, 0) ->
 await_binding(Config, Node, Vhost, X, Key, ExpectedBindingCount, AttemptsLeft) when is_integer(ExpectedBindingCount) ->
     case bound_keys_from(Config, Node, Vhost, X, Key) of
         Bs when length(Bs) < ExpectedBindingCount ->
-            timer:sleep(100),
+            timer:sleep(1000),
             await_binding(Config, Node, Vhost, X, Key, ExpectedBindingCount, AttemptsLeft - 1);
         Bs when length(Bs) =:= ExpectedBindingCount ->
             ok;

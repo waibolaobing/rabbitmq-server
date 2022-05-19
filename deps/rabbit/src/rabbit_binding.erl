@@ -412,7 +412,7 @@ notify_bindings_deletion(Bs, ActingUser) ->
      || B <- Bs],
     ok.
 
--spec process_deletions(deletions(), 'true' | 'false') -> rabbit_misc:thunk('ok').
+-spec process_deletions(deletions(), 'true' | 'false' | 'all') -> rabbit_misc:thunk('ok').
 process_deletions(Deletions, true) ->
     dict:map(fun (_XName, {X, deleted, Bindings}) ->
                      Bs = lists:flatten(Bindings),
@@ -424,7 +424,7 @@ process_deletions(Deletions, true) ->
                      rabbit_exchange:callback(X, remove_bindings, transaction, [X, Bs]),
                      {X, not_deleted, Bs, Serial}
              end, Deletions);
-process_deletions(Deletions, false) ->
+process_deletions(Deletions, Tag) when Tag == false; Tag == all ->
     dict:map(fun (_XName, {X, deleted, Bs, Serial} = Del) ->
                      rabbit_exchange:callback(X, delete, Serial, [X, Bs]),
                      Del;

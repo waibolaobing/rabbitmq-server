@@ -26,46 +26,40 @@
 
 all() ->
     [
-     {group, classic_queue},
-     {group, quorum_queue},
-     {group, mixed}
+     {group, mnesia_store},
+     {group, khepri_store}
     ].
 
 groups() ->
-    ClusterSize1 = [simple,
-                    multiple_upstreams,
-                    multiple_upstreams_pattern,
-                    multiple_downstreams,
-                    message_flow,
-                    dynamic_reconfiguration,
-                    federate_unfederate,
-                    dynamic_plugin_stop_start
-                   ],
-    ClusterSize2 = [restart_upstream],
-    [{classic_queue, [], [
-                          {without_disambiguate, [], [
-                                                      {cluster_size_1, [], ClusterSize1}
-                                                     ]},
-                          {with_disambiguate, [], [
-                                                   {cluster_size_2, [], ClusterSize2}
-                                                  ]}
-                         ]},
-     {quorum_queue, [], [
-                         {without_disambiguate, [], [
-                                                     {cluster_size_1, [], ClusterSize1}
-                                                    ]},
-                         {with_disambiguate, [], [
-                                                  {cluster_size_2, [], ClusterSize2}
-                                                  ]}
+    [{mnesia_store, [], [
+                         {classic_queue, [], all_tests()},
+                         {quorum_queue, [], all_tests()},
+                         {mixed, [], all_tests()}
                         ]},
-     {mixed, [], [
-                  {without_disambiguate, [], [
-                                              {cluster_size_1, [], ClusterSize1}
-                                             ]},
-                  {with_disambiguate, [], [
-                                           {cluster_size_2, [], ClusterSize2}
-                                          ]}
-                 ]}
+     {khepri_store, [], [
+                         {classic_queue, [], all_tests()},
+                         {quorum_queue, [], all_tests()},
+                         {mixed, [], all_tests()}
+                        ]}
+    ].
+
+all_tests() ->
+    [
+     {without_disambiguate, [], [
+                                 {cluster_size_1, [], [
+                                                       simple,
+                                                       multiple_upstreams,
+                                                       multiple_upstreams_pattern,
+                                                       multiple_downstreams,
+                                                       message_flow,
+                                                       dynamic_reconfiguration,
+                                                       federate_unfederate,
+                                                       dynamic_plugin_stop_start
+                                                      ]}
+                                ]},
+     {with_disambiguate, [], [
+                              {cluster_size_2, [], [restart_upstream]}
+                             ]}
     ].
 
 %% -------------------------------------------------------------------
@@ -79,6 +73,10 @@ init_per_suite(Config) ->
 end_per_suite(Config) ->
     rabbit_ct_helpers:run_teardown_steps(Config).
 
+init_per_group(mnesia_store, Config) ->
+    rabbit_ct_helpers:set_config(Config, [{metadata_store, mnesia}]);
+init_per_group(khepri_store, Config) ->
+    rabbit_ct_helpers:set_config(Config, [{metadata_store, khepri}]);
 init_per_group(classic_queue, Config) ->
     rabbit_ct_helpers:set_config(
       Config,
@@ -157,6 +155,10 @@ init_per_group1(Group, Config) ->
             Config2
     end.
 
+end_per_group(mnesia_store, Config) ->
+    Config;
+end_per_group(khepri_store, Config) ->
+    Config;
 end_per_group(without_disambiguate, Config) ->
     Config;
 end_per_group(with_disambiguate, Config) ->

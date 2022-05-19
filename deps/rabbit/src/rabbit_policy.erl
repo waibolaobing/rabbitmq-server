@@ -182,14 +182,15 @@ match_all(NameOrQueue, Policies) ->
    lists:sort(fun priority_comparator/2, [P || P <- Policies, matches(NameOrQueue, P)]).
 
 matches(#resource{name = Name, kind = Kind, virtual_host = VHost} = Resource, Policy) ->
-    matches_type(Kind, pget('apply-to', Policy)) andalso
         is_applicable(Resource, pget(definition, Policy)) andalso
-        match =:= re:run(Name, pget(pattern, Policy), [{capture, none}]) andalso
-        VHost =:= pget(vhost, Policy);
+        matches(Name, Kind, VHost, Policy);
 matches(Q, Policy) ->
     #resource{name = Name, kind = Kind, virtual_host = VHost} = amqqueue:get_name(Q),
-    matches_type(Kind, pget('apply-to', Policy)) andalso
         is_applicable(Q, pget(definition, Policy)) andalso
+        matches(Name, Kind, VHost, Policy).
+
+matches(Name, Kind, VHost, Policy) ->
+    matches_type(Kind, pget('apply-to', Policy)) andalso
         match =:= re:run(Name, pget(pattern, Policy), [{capture, none}]) andalso
         VHost =:= pget(vhost, Policy).
 
@@ -560,7 +561,8 @@ get_updated_exchange(X = #exchange{name = XName,
     case {match(XName, Policies), match(XName, OpPolicies)} of
         {OldPolicy, OldOpPolicy} -> no_change;
         {NewPolicy, NewOpPolicy} ->
-            Decorators = rabbit_exchange_decorator:active(X),
+            Decorators = rabbit_exchange_decorator:active(X#exchange{policy = NewPolicy,
+                                                                     operator_policy = NewOpPolicy}),
             #{exchange => X,
               policy => NewPolicy,
               op_policy => NewOpPolicy,
@@ -573,7 +575,8 @@ get_updated_queue(Q0, Policies, OpPolicies) when ?is_amqqueue(Q0) ->
     case {match(Q0, Policies), match(Q0, OpPolicies)} of
         {OldPolicy, OldOpPolicy} -> no_change;
         {NewPolicy, NewOpPolicy} ->
-            Decorators = rabbit_queue_decorator:active(Q0),
+            Q = amqqueue:set_operator_policy(amqqueue:set_policy(Q0, NewPolicy), NewOpPolicy),
+            Decorators = rabbit_queue_decorator:active(Q),
             #{queue => Q0,
               policy => NewPolicy,
               op_policy => NewOpPolicy,

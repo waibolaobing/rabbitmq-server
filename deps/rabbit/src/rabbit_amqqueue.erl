@@ -254,9 +254,15 @@ internal_declare(Q, Recover) ->
        end).
 
 do_internal_declare(Q0, true) ->
+    %% TODO Why do we return the old state instead of the actual one?
+    %% I'm leaving it like it was before the khepri refactor, because
+    %% rabbit_amqqueue_process:init_it2 compares the result of this declare to decide
+    %% if continue or stop. If we return the actual one, it fails and the queue stops
+    %% silently during init.
+    %% Maybe we should review this bit of code at some point.
     Q = amqqueue:set_state(Q0, live),
     store_queue(Q),
-    {created, Q};
+    {created, Q0};
 do_internal_declare(Q0, false) ->
     Q = rabbit_policy:set(amqqueue:set_state(Q0, live)),
     Queue = rabbit_queue_decorator:set(Q),

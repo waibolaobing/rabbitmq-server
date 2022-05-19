@@ -18,7 +18,7 @@
 -export([list_names/0, is_amq_prefixed/1]).
 -export([serialise_events/1]).
 -export([serial/1]).
--export([peek_serial/2]).
+-export([peek_serial/1]).
 %%----------------------------------------------------------------------------
 
 -export_type([name/0, type/0]).
@@ -84,9 +84,9 @@ serial(X) ->
         true -> rabbit_store:next_exchange_serial(X)
     end.
 
--spec peek_serial(name(), mnesia | khepri) -> pos_integer() | 'undefined'.
-peek_serial(XName, Store) ->
-    rabbit_store:peek_exchange_serial(XName, read, Store).
+-spec peek_serial(name()) -> pos_integer() | 'undefined'.
+peek_serial(XName) ->
+    rabbit_store:peek_exchange_serial(XName, read).
 
 -spec is_amq_prefixed(rabbit_types:exchange() | binary()) -> boolean().
 
@@ -272,7 +272,8 @@ update_scratch(Name, App, Fun) ->
                      {ok, X} -> rabbit_exchange_decorator:active(X);
                      {error, not_found} -> []
                  end,
-    rabbit_store:update_exchange_scratch(Name, update_scratch_fun(App, Fun, Decorators)).
+    rabbit_store:update_exchange_scratch(Name, update_scratch_fun(App, Fun, Decorators)),
+    ok.
 
 update_scratch_fun(App, Fun, Decorators) ->
     fun(X = #exchange{scratches = Scratches0}) ->
