@@ -55,14 +55,20 @@
 
 % Initialise database table for all exchanges of type <<"x-jms-topic">>
 setup_db_schema() ->
-  case mnesia:create_table( ?JMS_TOPIC_TABLE
-                          , [ {attributes, record_info(fields, ?JMS_TOPIC_RECORD)}
-                            , {record_name, ?JMS_TOPIC_RECORD}
-                            , {type, set} ]
-                          ) of
-    {atomic, ok} -> ok;
-    {aborted, {already_exists, ?JMS_TOPIC_TABLE}} -> ok
-  end.
+    rabbit_khepri:try_mnesia_or_khepri(
+      fun() ->
+              case mnesia:create_table( ?JMS_TOPIC_TABLE
+                                      , [ {attributes, record_info(fields, ?JMS_TOPIC_RECORD)}
+                                        , {record_name, ?JMS_TOPIC_RECORD}
+                                        , {type, set} ]
+                                      ) of
+                  {atomic, ok} -> ok;
+                  {aborted, {already_exists, ?JMS_TOPIC_TABLE}} -> ok
+              end
+      end,
+      fun() ->
+              ok
+      end).
 
 %%----------------------------------------------------------------------------
 %% R E F E R E N C E   T Y P E   I N F O R M A T I O N
@@ -230,27 +236,74 @@ selector_match(Selector, Headers) ->
 
 % get binding funs from state (using dirty_reads)
 get_binding_funs_x(XName) ->
-  mnesia:async_dirty(
-    fun() ->
-      #?JMS_TOPIC_RECORD{x_selector_funs = BindingFuns} = read_state(XName),
-      BindingFuns
-    end,
-    []
-  ).
+    rabbit_khepri:try_mnesia_or_khepri(
+      fun() ->
+              mnesia:async_dirty(
+                fun() ->
+                        #?JMS_TOPIC_RECORD{x_selector_funs = BindingFuns}
+                            = read_state_in_mnesia(XName),
+                        BindingFuns
+                end,
+                []
+               )
+      end,
+      fun() ->
+              read_state_in_khepri(XName)
+      end).
 
 add_initial_record(XName) ->
   write_state_fun(XName, dict:new()).
 
 % add binding fun to binding fun dictionary
 add_binding_fun(XName, BindingKeyAndFun) ->
-  #?JMS_TOPIC_RECORD{x_selector_funs = BindingFuns} = read_state_for_update(XName),
-  write_state_fun(XName, put_item(BindingFuns, BindingKeyAndFun)).
+    rabbit_khepri:try_mnesia_or_khepri(
+      fun() ->
+              #?JMS_TOPIC_RECORD{x_selector_funs = BindingFuns} =
+                  read_state_for_update_in_mnesia(XName),
+              write_state_fun_in_mnesia(XName, put_item(BindingFuns, BindingKeyAndFun))
+      end,
+      fun() ->
+              Path = khepri_jms_topic_exchange_path(XName),
+              case rabbit_khepri:transaction(
+                     fun() ->
+                             case khepri_tx:get(Path) of
+                                 {ok, #{Path := #{data := BindingFuns}}} ->
+                                     {ok, _} = khepri_tx:put(Path, put_item(BindingFuns, BindingKeyAndFun)),
+                                     ok;
+                                 Err ->
+                                     Err
+                             end
+                     end) of
+                  ok -> ok;
+                  _ -> exchange_state_corrupt_error(XName)
+              end
+      end).
 
 % remove binding funs from binding fun dictionary
 remove_binding_funs(XName, Bindings) ->
   BindingKeys = [ {BindingKey, DestName} || #binding{key = BindingKey, destination = DestName} <- Bindings ],
-  #?JMS_TOPIC_RECORD{x_selector_funs = BindingFuns} = read_state_for_update(XName),
-  write_state_fun(XName, remove_items(BindingFuns, BindingKeys)).
+    rabbit_khepri:try_mnesia_or_khepri(
+      fun() ->
+              #?JMS_TOPIC_RECORD{x_selector_funs = BindingFuns} =
+                  read_state_for_update_in_mnesia(XName),
+              write_state_fun_in_mnesia(XName, remove_items(BindingFuns, BindingKeys))
+      end,
+      fun() ->
+              Path = khepri_jms_topic_exchange_path(XName),
+              case rabbit_khepri:transaction(
+                     fun() ->
+                             case khepri_tx:get(Path) of
+                                 {ok, #{Path := #{data := BindingFuns}}} ->
+                                     {ok, _} = khepri_tx:put(Path, remove_items(BindingFuns, BindingKeys)),
+                                     ok;
+                                 Err ->
+                                     Err
+                             end
+                     end) of
+                  ok -> ok;
+                  _ -> exchange_state_corrupt_error(XName)
+              end
+      end).
 
 % add an item to the dictionary of binding functions
 put_item(Dict, {Key, Item}) -> dict:store(Key, Item, Dict).
@@ -261,26 +314,50 @@ remove_items(Dict, [Key | Keys]) -> remove_items(dict:erase(Key, Dict), Keys).
 
 % delete all the state saved for this exchange
 delete_state(XName) ->
-  mnesia:delete(?JMS_TOPIC_TABLE, XName, write).
+    rabbit_khepri:try_mnesia_or_khepri(
+      fun() ->
+              mnesia:delete(?JMS_TOPIC_TABLE, XName, write)
+      end,
+      fun() ->
+              rabbit_khepri:delete(khepri_jms_topic_exchange_path(XName))
+      end).
 
 % Basic read for update
-read_state_for_update(XName) -> read_state(XName, write).
+read_state_for_update_in_mnesia(XName) -> read_state_in_mnesia(XName, write).
 
 % Basic read
-read_state(XName) -> read_state(XName, read).
+read_state_in_mnesia(XName) -> read_state_in_mnesia(XName, read).
 
 % Lockable read
-read_state(XName, Lock) ->
+read_state_in_mnesia(XName, Lock) ->
   case mnesia:read(?JMS_TOPIC_TABLE, XName, Lock) of
     [Rec] -> Rec;
     _     -> exchange_state_corrupt_error(XName)
   end.
 
+read_state_in_khepri(XName) ->
+    case rabbit_khepri:get(khepri_jms_topic_exchange_path(XName)) of
+        {ok, #{data := BindingFuns}} ->
+            BindingFuns;
+        _ ->
+            exchange_state_corrupt_error(XName)
+    end.
+
 % Basic write
 write_state_fun(XName, BFuns) ->
-  mnesia:write( ?JMS_TOPIC_TABLE
-              , #?JMS_TOPIC_RECORD{x_name = XName, x_selector_funs = BFuns}
-              , write ).
+    rabbit_khepri:try_mnesia_or_khepri(
+      fun() ->
+              write_state_fun_in_mnesia(XName, BFuns)
+      end,
+      fun() ->
+              {ok, _} = rabbit_khepri:put(khepri_jms_topic_exchange_path(XName), BFuns),
+              ok
+      end).
+
+write_state_fun_in_mnesia(XName, BFuns) ->
+    mnesia:write( ?JMS_TOPIC_TABLE
+                , #?JMS_TOPIC_RECORD{x_name = XName, x_selector_funs = BFuns}
+                , write ).
 
 %%----------------------------------------------------------------------------
 %% E R R O R S
@@ -298,3 +375,8 @@ parsing_error(#resource{name = XName}, S, #resource{name = DestName}) ->
                             , [S, DestName, XName] ).
 
 %%----------------------------------------------------------------------------
+khepri_jms_topic_exchange_path(#resource{virtual_host = VHost, name = Name}) ->
+    [?MODULE, jms_topic_exchange, VHost, Name].
+
+khepri_jms_topic_exchange_path() ->
+    [?MODULE, jms_topic_exchange].

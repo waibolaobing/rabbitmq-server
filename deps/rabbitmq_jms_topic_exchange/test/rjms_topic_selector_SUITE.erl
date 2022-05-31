@@ -22,14 +22,20 @@
 
 all() ->
     [
-      {group, parallel_tests}
+     {group, mnesia_store},
+     {group, khepri_store}
     ].
 
 groups() ->
     [
-      {parallel_tests, [parallel], [
-                                    test_topic_selection
-                                   ]}
+     {mnesia_store, [], [{parallel_tests, [parallel], [
+                                                       test_topic_selection
+                                                      ]}
+                        ]},
+     {khepri_store, [], [{parallel_tests, [parallel], [
+                                                       test_topic_selection
+                                                      ]}
+                        ]}
     ].
 
 %% -------------------------------------------------------------------
@@ -38,6 +44,16 @@ groups() ->
 
 init_per_suite(Config) ->
     rabbit_ct_helpers:log_environment(),
+    rabbit_ct_helpers:run_setup_steps(Config).
+
+end_per_suite(Config) ->
+    rabbit_ct_helpers:run_teardown_steps(Config).
+
+init_per_group(mnesia_store, Config) ->
+    rabbit_ct_helpers:set_config(Config, [{metadata_store, mnesia}]);
+init_per_group(khepri_store, Config) ->
+    rabbit_ct_helpers:set_config(Config, [{metadata_store, khepri}]);
+init_per_group(_, Config) ->
     Config1 = rabbit_ct_helpers:set_config(Config, [
         {rmq_nodename_suffix, ?MODULE}
       ]),
@@ -45,16 +61,14 @@ init_per_suite(Config) ->
       rabbit_ct_broker_helpers:setup_steps() ++
       rabbit_ct_client_helpers:setup_steps()).
 
-end_per_suite(Config) ->
-    rabbit_ct_helpers:run_teardown_steps(Config,
-      rabbit_ct_client_helpers:teardown_steps() ++
-      rabbit_ct_broker_helpers:teardown_steps()).
-
-init_per_group(_, Config) ->
-    Config.
-
+end_per_group(mnesia_store, Config) ->
+    Config;
+end_per_group(khepri_store, Config) ->
+    Config;
 end_per_group(_, Config) ->
-    Config.
+    rabbit_ct_helpers:run_teardown_steps(Config,
+                                         rabbit_ct_client_helpers:teardown_steps() ++
+                                             rabbit_ct_broker_helpers:teardown_steps()).
 
 init_per_testcase(Testcase, Config) ->
     rabbit_ct_helpers:testcase_started(Config, Testcase).
