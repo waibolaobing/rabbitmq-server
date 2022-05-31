@@ -28,8 +28,8 @@
                     {requires, rabbit_registry},
                     {enables, kernel_ready}]}).
 
--rabbit_boot_step({rabbit_exchange_type_recent_history_mnesia,
-                   [{description, "recent history exchange type: mnesia"},
+-rabbit_boot_step({rabbit_exchange_type_recent_history_metadata_store,
+                   [{description, "recent history exchange type: metadata store"},
                     {mfa, {?MODULE, setup_schema, []}},
                     {requires, database},
                     {enables, external_infrastructure}]}).
@@ -74,9 +74,15 @@ create(_Tx, _X) -> ok.
 policy_changed(_X1, _X2) -> ok.
 
 delete(transaction, #exchange{ name = XName }, _Bs) ->
-    rabbit_misc:execute_mnesia_transaction(
+    rabbit_khepri:try_mnesia_or_khepri(
       fun() ->
-              mnesia:delete(?RH_TABLE, XName, write)
+              rabbit_misc:execute_mnesia_transaction(
+                fun() ->
+                        mnesia:delete(?RH_TABLE, XName, write)
+                end)
+      end,
+      fun() ->
+              rabbit_khepri:delete(khepri_recent_history_path(XName))
       end),
     ok;
 delete(none, _Exchange, _Bs) ->
@@ -122,17 +128,29 @@ assert_args_equivalence(X, Args) ->
 %%----------------------------------------------------------------------------
 
 setup_schema() ->
-    mnesia:create_table(?RH_TABLE,
-                             [{attributes, record_info(fields, cached)},
-                              {record_name, cached},
-                              {type, set}]),
-    mnesia:add_table_copy(?RH_TABLE, node(), ram_copies),
-    rabbit_table:wait([?RH_TABLE]),
-    ok.
+    rabbit_khepri:try_mnesia_or_khepri(
+      fun() ->
+              mnesia:create_table(?RH_TABLE,
+                                  [{attributes, record_info(fields, cached)},
+                                   {record_name, cached},
+                                   {type, set}]),
+              mnesia:add_table_copy(?RH_TABLE, node(), ram_copies),
+              rabbit_table:wait([?RH_TABLE]),
+              ok
+      end,
+      fun() ->
+              ok
+      end).
 
 disable_plugin() ->
     rabbit_registry:unregister(exchange, <<"x-recent-history">>),
-    mnesia:delete_table(?RH_TABLE),
+    rabbit_khepri:try_mnesia_or_khepri(
+      fun() ->
+              mnesia:delete_table(?RH_TABLE)
+      end,
+      fun() ->
+              rabbit_khepri:delete(khepri_recent_history_path())
+      end),
     ok.
 
 %%----------------------------------------------------------------------------
@@ -157,33 +175,69 @@ maybe_cache_msg(XName,
     end.
 
 cache_msg(XName, Message, Length) ->
-    rabbit_misc:execute_mnesia_transaction(
-      fun () ->
-              Cached = get_msgs_from_cache(XName),
-              store_msg(XName, Cached, Message, Length)
+    rabbit_khepri:try_mnesia_or_khepri(
+      fun() ->
+              rabbit_misc:execute_mnesia_transaction(
+                fun () ->
+                        Cached = get_msgs_from_cache_in_mnesia(XName),
+                        store_msg_in_mnesia(XName, Cached, Message, Length)
+                end)
+      end,
+      fun() ->
+              rabbit_khepri:transaction(
+                fun() ->
+                        Cached = get_msgs_from_cache_in_khepri_tx(XName),
+                        store_msg_in_khepri_tx(XName, Cached, Message, Length)
+                end)
       end).
 
 get_msgs_from_cache(XName) ->
-    rabbit_misc:execute_mnesia_transaction(
-      fun () ->
-              case mnesia:read(?RH_TABLE, XName) of
-                  [] ->
-                      [];
-                  [#cached{key = XName, content=Cached}] ->
-                      Cached
-              end
+    rabbit_khepri:try_mnesia_or_khepri(
+      fun() ->
+              rabbit_misc:execute_mnesia_transaction(
+                fun() -> get_msgs_from_cache_in_mnesia(XName) end)
+      end,
+      fun() ->
+              rabbit_khepri:transaction(
+                fun() -> get_msgs_from_cache_in_khepri_tx(XName) end)
       end).
 
-store_msg(Key, Cached, Message, undefined) ->
-    store_msg0(Key, Cached, Message, ?KEEP_NB);
-store_msg(Key, Cached, Message, {_Type, Length}) ->
-    store_msg0(Key, Cached, Message, Length).
+get_msgs_from_cache_in_mnesia(XName) ->
+    case mnesia:read(?RH_TABLE, XName) of
+        [] ->
+            [];
+        [#cached{key = XName, content=Cached}] ->
+            Cached
+    end.
 
-store_msg0(Key, Cached, Message, Length) ->
+get_msgs_from_cache_in_khepri_tx(XName) ->
+    Path = khepri_recent_history_path(XName),
+    case khepri_tx:get(Path) of
+        {ok, #{Path := #{data := Cached}}} ->
+            Cached;
+        _ ->
+            []
+    end.
+
+store_msg_in_mnesia(Key, Cached, Message, undefined) ->
+    store_msg0_in_mnesia(Key, Cached, Message, ?KEEP_NB);
+store_msg_in_mnesia(Key, Cached, Message, {_Type, Length}) ->
+    store_msg0_in_mnesia(Key, Cached, Message, Length).
+
+store_msg0_in_mnesia(Key, Cached, Message, Length) ->
     mnesia:write(?RH_TABLE,
                  #cached{key     = Key,
                          content = [Message|lists:sublist(Cached, Length-1)]},
                  write).
+
+store_msg_in_khepri_tx(Key, Cached, Message, undefined) ->
+    store_msg0_in_khepri_tx(Key, Cached, Message, ?KEEP_NB);
+store_msg_in_khepri_tx(Key, Cached, Message, {_Type, Length}) ->
+    store_msg0_in_khepri_tx(Key, Cached, Message, Length).
+
+store_msg0_in_khepri_tx(Key, Cached, Message, Length) ->
+    khepri_tx:put(khepri_recent_history_path(Key),
+                  [Message|lists:sublist(Cached, Length-1)]).
 
 deliver_messages(Qs, Msgs) ->
     lists:map(
@@ -204,3 +258,9 @@ check_int_arg(Type) ->
         true  -> ok;
         false -> {error, {unacceptable_type, Type}}
     end.
+
+khepri_recent_history_path() ->
+    [?MODULE, recent_history_exchange].
+
+khepri_recent_history_path(#resource{virtual_host = VHost, name = Name}) ->
+    [?MODULE, recent_history_exchange, VHost, Name].

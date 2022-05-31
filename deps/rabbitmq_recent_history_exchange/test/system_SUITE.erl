@@ -15,19 +15,28 @@
 
 all() ->
     [
-      {group, non_parallel_tests}
+     {group, mnesia_store},
+     {group, khepri_store}
     ].
 
 groups() ->
     [
-      {non_parallel_tests, [], [
-                                default_length_test,
-                                length_argument_test,
-                                wrong_argument_type_test,
-                                no_store_test,
-                                e2e_test,
-                                multinode_test
-                               ]}
+     {mnesia_store, [], [
+                         {non_parallel_tests, [], all_tests()}
+                        ]},
+     {khepri_store, [], [
+                         {non_parallel_tests, [], all_tests()}
+                        ]}
+    ].
+
+all_tests() ->
+    [
+     default_length_test,
+     length_argument_test,
+     wrong_argument_type_test,
+     no_store_test,
+     e2e_test,
+     multinode_test
     ].
 
 %% -------------------------------------------------------------------
@@ -37,24 +46,32 @@ groups() ->
 init_per_suite(Config) ->
     inets:start(),
     rabbit_ct_helpers:log_environment(),
-    Config1 = rabbit_ct_helpers:set_config(Config, [
-        {rmq_nodename_suffix, ?MODULE},
-        {rmq_nodes_count,     2}
-      ]),
-    rabbit_ct_helpers:run_setup_steps(Config1,
-      rabbit_ct_broker_helpers:setup_steps() ++
-      rabbit_ct_client_helpers:setup_steps()).
+    rabbit_ct_helpers:run_setup_steps(Config).
 
 end_per_suite(Config) ->
-    rabbit_ct_helpers:run_teardown_steps(Config,
-      rabbit_ct_client_helpers:teardown_steps() ++
-      rabbit_ct_broker_helpers:teardown_steps()).
+    rabbit_ct_helpers:run_teardown_steps(Config).
 
+init_per_group(mnesia_store, Config) ->
+    rabbit_ct_helpers:set_config(Config, [{metadata_store, mnesia}]);
+init_per_group(khepri_store, Config) ->
+    rabbit_ct_helpers:set_config(Config, [{metadata_store, khepri}]);
 init_per_group(_, Config) ->
-    Config.
+    Config1 = rabbit_ct_helpers:set_config(Config, [
+                                                    {rmq_nodename_suffix, ?MODULE},
+                                                    {rmq_nodes_count,     2}
+                                                   ]),
+    rabbit_ct_helpers:run_setup_steps(Config1,
+                                      rabbit_ct_broker_helpers:setup_steps() ++
+                                          rabbit_ct_client_helpers:setup_steps()).
 
+end_per_group(mnesia_store, Config) ->
+    Config;
+end_per_group(khepri_store, Config) ->
+    Config;
 end_per_group(_, Config) ->
-    Config.
+    rabbit_ct_helpers:run_teardown_steps(Config,
+                                         rabbit_ct_client_helpers:teardown_steps() ++
+                                             rabbit_ct_broker_helpers:teardown_steps()).
 
 init_per_testcase(Testcase, Config) ->
     TestCaseName = rabbit_ct_helpers:config_to_testcase_name(Config, Testcase),
@@ -185,7 +202,7 @@ multinode_test(Config) ->
                                    exchange = make_exchange_name(Config, "1"),
                                    routing_key = <<"">>
                                   }),
-
+    
     amqp_channel:call(Chan, #'queue.delete' { queue = Q }),
     rabbit_ct_client_helpers:close_connection_and_channel(Conn, Chan),
 
