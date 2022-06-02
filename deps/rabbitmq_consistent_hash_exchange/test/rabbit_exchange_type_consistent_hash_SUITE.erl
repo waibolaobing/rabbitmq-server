@@ -16,35 +16,47 @@
 
 all() ->
     [
-      {group, routing_tests},
-      {group, hash_ring_management_tests}
+     {group, mnesia_store},
+     {group, khepri_store}
     ].
 
 groups() ->
     [
-      {routing_tests, [], [
-                                routing_key_hashing_test,
-                                custom_header_hashing_test,
-                                message_id_hashing_test,
-                                correlation_id_hashing_test,
-                                timestamp_hashing_test,
-                                other_routing_test
-                               ]},
-      {hash_ring_management_tests, [], [
-                                test_durable_exchange_hash_ring_recovery_between_node_restarts,
-                                test_hash_ring_updates_when_queue_is_deleted,
-                                test_hash_ring_updates_when_multiple_queues_are_deleted,
-                                test_hash_ring_updates_when_exclusive_queues_are_deleted_due_to_connection_closure,
-                                test_hash_ring_updates_when_exclusive_queues_are_deleted_due_to_connection_closure_case2,
-                                test_hash_ring_updates_when_exclusive_queues_are_deleted_due_to_connection_closure_case3,
-                                test_hash_ring_updates_when_exclusive_queues_are_deleted_due_to_connection_closure_case4,
-                                test_hash_ring_updates_when_exclusive_queues_are_deleted_due_to_connection_closure_case5,
-                                test_hash_ring_updates_when_exclusive_queues_are_deleted_due_to_connection_closure_case6,
-                                test_hash_ring_updates_when_exchange_is_deleted,
-                                test_hash_ring_updates_when_queue_is_unbound,
-                                test_hash_ring_updates_when_duplicate_binding_is_created_and_queue_is_deleted,
-                                test_hash_ring_updates_when_duplicate_binding_is_created_and_binding_is_deleted
-                               ]}
+     {mnesia_store, [], [
+                         {routing_tests, [], routing_tests()},
+                         {hash_ring_management_tests, [], hash_ring_management_tests()}
+                        ]},
+     {khepri_store, [], [
+                         {routing_tests, [], routing_tests()},
+                         {hash_ring_management_tests, [], hash_ring_management_tests()}
+                        ]}
+    ].
+
+routing_tests() ->
+    [
+     routing_key_hashing_test,
+     custom_header_hashing_test,
+     message_id_hashing_test,
+     correlation_id_hashing_test,
+     timestamp_hashing_test,
+     other_routing_test
+    ].
+
+hash_ring_management_tests() ->
+    [
+     test_durable_exchange_hash_ring_recovery_between_node_restarts,
+     test_hash_ring_updates_when_queue_is_deleted,
+     test_hash_ring_updates_when_multiple_queues_are_deleted,
+     test_hash_ring_updates_when_exclusive_queues_are_deleted_due_to_connection_closure,
+     test_hash_ring_updates_when_exclusive_queues_are_deleted_due_to_connection_closure_case2,
+     test_hash_ring_updates_when_exclusive_queues_are_deleted_due_to_connection_closure_case3,
+     test_hash_ring_updates_when_exclusive_queues_are_deleted_due_to_connection_closure_case4,
+     test_hash_ring_updates_when_exclusive_queues_are_deleted_due_to_connection_closure_case5,
+     test_hash_ring_updates_when_exclusive_queues_are_deleted_due_to_connection_closure_case6,
+     test_hash_ring_updates_when_exchange_is_deleted,
+     test_hash_ring_updates_when_queue_is_unbound,
+     test_hash_ring_updates_when_duplicate_binding_is_created_and_queue_is_deleted,
+     test_hash_ring_updates_when_duplicate_binding_is_created_and_binding_is_deleted
     ].
 
 %% -------------------------------------------------------------------
@@ -53,23 +65,31 @@ groups() ->
 
 init_per_suite(Config) ->
     rabbit_ct_helpers:log_environment(),
-    Config1 = rabbit_ct_helpers:set_config(Config, [
-        {rmq_nodename_suffix, ?MODULE}
-      ]),
-    rabbit_ct_helpers:run_setup_steps(Config1,
-      rabbit_ct_broker_helpers:setup_steps() ++
-      rabbit_ct_client_helpers:setup_steps()).
+    rabbit_ct_helpers:run_setup_steps(Config).
 
 end_per_suite(Config) ->
-    rabbit_ct_helpers:run_teardown_steps(Config,
-      rabbit_ct_client_helpers:teardown_steps() ++
-      rabbit_ct_broker_helpers:teardown_steps()).
+    rabbit_ct_helpers:run_teardown_steps(Config).
 
+init_per_group(mnesia_store, Config) ->
+    rabbit_ct_helpers:set_config(Config, [{metadata_store, mnesia}]);
+init_per_group(khepri_store, Config) ->
+    rabbit_ct_helpers:set_config(Config, [{metadata_store, khepri}]);
 init_per_group(_, Config) ->
-    Config.
+    Config1 = rabbit_ct_helpers:set_config(Config, [
+                                                    {rmq_nodename_suffix, ?MODULE}
+                                                   ]),
+    rabbit_ct_helpers:run_setup_steps(Config1,
+                                      rabbit_ct_broker_helpers:setup_steps() ++
+                                          rabbit_ct_client_helpers:setup_steps()).
 
+end_per_group(mnesia_store, Config) ->
+    Config;
+end_per_group(khepri_store, Config) ->
+    Config;
 end_per_group(_, Config) ->
-    Config.
+    rabbit_ct_helpers:run_teardown_steps(Config,
+                                         rabbit_ct_client_helpers:teardown_steps() ++
+                                             rabbit_ct_broker_helpers:teardown_steps()).
 
 init_per_testcase(Testcase, Config) ->
     clean_up_test_topology(Config),
@@ -232,7 +252,7 @@ test0(Config, MakeMethod, MakeMsg, DeclareArgs, [Q1, Q2, Q3, Q4] = Queues, Itera
                        MakeMsg()) || _ <- lists:duplicate(IterationCount, const)],
     amqp_channel:wait_for_confirms(Chan, 300),
     timer:sleep(500),
-
+    
     Counts =
         [begin
              #'queue.declare_ok'{message_count = M} =
@@ -659,16 +679,14 @@ test_hash_ring_updates_when_duplicate_binding_is_created_and_binding_is_deleted(
 
 hash_ring_state(Config, X) ->
     rabbit_ct_broker_helpers:rpc(
-      Config, 0, ets, lookup,
-      [rabbit_exchange_type_consistent_hash_ring_state,
-       rabbit_misc:r(<<"/">>, exchange, X)]).
+      Config, 0, rabbit_exchange_type_consistent_hash, ring_state, [<<"/">>, X]).
 
 hash_ring_rows(Config) ->
     rabbit_ct_broker_helpers:rpc(
       Config, 0, ets, tab2list, [rabbit_exchange_type_consistent_hash_ring_state]).
 
 assert_ring_consistency(Config, X) ->
-    [#chx_hash_ring{bucket_map = M}] = hash_ring_state(Config, X),
+    {ok, #chx_hash_ring{bucket_map = M}} = hash_ring_state(Config, X),
     Buckets = lists:usort(maps:keys(M)),
     Hi      = lists:last(Buckets),
 
@@ -677,8 +695,10 @@ assert_ring_consistency(Config, X) ->
 
 count_buckets_of_exchange(Config, X) ->
     case hash_ring_state(Config, X) of
-        [#chx_hash_ring{bucket_map = M}] -> maps:size(M);
-        []                               -> 0
+        {ok, #chx_hash_ring{bucket_map = M}} ->
+            ct:pal("BUCKET MAP ~p", [M]),
+            maps:size(M);
+        {error, not_found}                   -> 0
     end.
 
 count_all_hash_ring_buckets(Config) ->

@@ -18,7 +18,7 @@
          lookup_exchange/1, lookup_many_exchanges/1, peek_exchange_serial/2,
          next_exchange_serial/1, delete_exchange_in_khepri/3,
          delete_exchange_in_mnesia/3, delete_exchange/3,
-         recover_exchanges/1, store_durable_exchanges/1]).
+         recover_exchanges/1, store_durable_exchanges/1, match_exchanges/1]).
 
 -export([mnesia_write_exchange_to_khepri/1, mnesia_write_durable_exchange_to_khepri/1,
          mnesia_write_exchange_serial_to_khepri/1,
@@ -191,6 +191,23 @@ list_durable_exchanges() ->
       end,
       fun() ->
               Pattern = #if_data_matches{pattern = #exchange{durable = true, _ = '_'}},
+              list_in_khepri(khepri_exchanges_path() ++ [?STAR, Pattern])
+      end).
+
+match_exchanges(Pattern0) ->
+    rabbit_khepri:try_mnesia_or_khepri(
+      fun() ->
+              case mnesia:transaction(
+                     fun() ->
+                             mnesia:match_object(rabbit_exchange, Pattern0, read)
+                     end) of
+                  {atomic, Xs} -> Xs;
+                  {aborted, Err} -> {error, Err}
+              end
+      end,
+      fun() ->
+              %% TODO error handling?
+              Pattern = #if_data_matches{pattern = Pattern0},
               list_in_khepri(khepri_exchanges_path() ++ [?STAR, Pattern])
       end).
 
@@ -1213,7 +1230,7 @@ mnesia_write_topic_trie_binding_to_khepri(
     ok.
 
 %% Internal
-%% --------------------------------------------------------------
+%% -------------------------------------------------------------
 list_in_mnesia(Table, Match) ->
     %% Not dirty_match_object since that would not be transactional when used in a
     %% tx context
@@ -1384,7 +1401,9 @@ recover_exchanges(VHost, khepri) ->
     %% idempotent recovery is enough. The exchange record already
     %% contains the durable flag and we use it to clean up or recover
     %% records.
-    
+
+    %% TODO transient exchanges don't work. Maybe transient queues neither!!
+    %% TODO only works single node. multi-node if other nodes are up -> table should not be deleted!
     DurablePattern = #if_data_matches{pattern = #exchange{durable = true, _ = '_'}},
     DurableExchanges0 = list_in_khepri(khepri_exchanges_path() ++ [VHost, DurablePattern]),
     DurableExchanges = [rabbit_exchange_decorator:set(X) || X <- DurableExchanges0],
