@@ -144,8 +144,8 @@ PLT_APPS += mnesia
 dep_syslog = git https://github.com/schlagert/syslog 4.0.0
 dep_osiris = git https://github.com/rabbitmq/osiris main
 dep_systemd = hex 0.6.1
-dep_seshat = git https://github.com/rabbitmq/seshat main
-dep_khepri = git https://github.com/rabbitmq/khepri.git main
+dep_seshat = hex 0.3.2
+dep_khepri = git https://github.com/rabbitmq/khepri.git e34f7bd5b0597229d98a0013565c704658e223ba
 
 define usage_xml_to_erl
 $(subst __,_,$(patsubst $(DOCS_DIR)/rabbitmq%.1.xml, src/rabbit_%_usage.erl, $(subst -,_,$(1))))
