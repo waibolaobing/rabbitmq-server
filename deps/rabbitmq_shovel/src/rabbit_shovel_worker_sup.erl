@@ -15,11 +15,10 @@
 
 start_link(ShovelName, ShovelConfig) ->
     mirrored_supervisor:start_link({local, ShovelName}, ShovelName,
-                                   fun rabbit_misc:execute_mnesia_transaction/1,
                                    ?MODULE, [ShovelName, ShovelConfig]).
 
 init([Name, Config]) ->
-    ChildSpecs = [{Name,
+    ChildSpecs = [{id(Name),
                    {rabbit_shovel_worker, start_link, [static, Name, Config]},
                    case Config of
                        #{reconnect_delay := N}
@@ -30,3 +29,6 @@ init([Name, Config]) ->
                    worker,
                    [rabbit_shovel_worker]}],
     {ok, {{one_for_one, 1, ?MAX_WAIT}, ChildSpecs}}.
+
+id(Name) ->
+    {[Name], Name}.

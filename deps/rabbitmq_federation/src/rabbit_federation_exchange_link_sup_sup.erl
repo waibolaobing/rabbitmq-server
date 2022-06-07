@@ -27,7 +27,6 @@ start_link() ->
     %% The scope is stopped in stop/1.
     rabbit_federation_pg:start_scope(),
     mirrored_supervisor:start_link({local, ?SUPERVISOR}, ?SUPERVISOR,
-                                   fun rabbit_misc:execute_mnesia_transaction/1,
                                    ?MODULE, []).
 
 %% Note that the next supervisor down, rabbit_federation_link_sup, is common
@@ -50,12 +49,12 @@ start_child(X) ->
 
 adjust({clear_upstream, VHost, UpstreamName}) ->
     [rabbit_federation_link_sup:adjust(Pid, X, {clear_upstream, UpstreamName}) ||
-        {#exchange{name = Name} = X, Pid, _, _} <- mirrored_supervisor:which_children(?SUPERVISOR),
+        {{_, #exchange{name = Name} = X}, Pid, _, _} <- mirrored_supervisor:which_children(?SUPERVISOR),
         Name#resource.virtual_host == VHost],
     ok;
 adjust(Reason) ->
     [rabbit_federation_link_sup:adjust(Pid, X, Reason) ||
-        {X, Pid, _, _} <- mirrored_supervisor:which_children(?SUPERVISOR)],
+        {{_, X}, Pid, _, _} <- mirrored_supervisor:which_children(?SUPERVISOR)],
     ok.
 
 stop_child(X) ->
@@ -76,5 +75,9 @@ init([]) ->
     {ok, {{one_for_one, 1200, 60}, []}}.
 
 %% See comment in rabbit_federation_queue_link_sup_sup:id/1
-id(X = #exchange{policy = Policy}) -> X1 = rabbit_exchange:immutable(X),
-                                      X1#exchange{policy = Policy}.
+id(X = #exchange{policy = Policy}) ->
+    X1 = rabbit_exchange:immutable(X),
+    {simple_id(X), X1#exchange{policy = Policy}}.
+
+simple_id(#exchange{name = #resource{virtual_host = VHost, name = Name}}) ->
+    [exchange, VHost, Name].

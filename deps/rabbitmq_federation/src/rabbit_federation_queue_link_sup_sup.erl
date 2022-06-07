@@ -28,7 +28,6 @@ start_link() ->
     %% The scope is stopped in stop/1.
     rabbit_federation_pg:start_scope(),
     mirrored_supervisor:start_link({local, ?SUPERVISOR}, ?SUPERVISOR,
-                                   fun rabbit_misc:execute_mnesia_transaction/1,
                                    ?MODULE, []).
 
 %% Note that the next supervisor down, rabbit_federation_link_sup, is common
@@ -52,12 +51,12 @@ start_child(Q) ->
 
 adjust({clear_upstream, VHost, UpstreamName}) ->
     [rabbit_federation_link_sup:adjust(Pid, Q, {clear_upstream, UpstreamName}) ||
-        {Q, Pid, _, _} <- mirrored_supervisor:which_children(?SUPERVISOR),
+        {{_, Q}, Pid, _, _} <- mirrored_supervisor:which_children(?SUPERVISOR),
         ?amqqueue_vhost_equals(Q, VHost)],
     ok;
 adjust(Reason) ->
     [rabbit_federation_link_sup:adjust(Pid, Q, Reason) ||
-        {Q, Pid, _, _} <- mirrored_supervisor:which_children(?SUPERVISOR)],
+        {{_, Q}, Pid, _, _} <- mirrored_supervisor:which_children(?SUPERVISOR)],
     ok.
 
 stop_child(Q) ->
@@ -89,4 +88,8 @@ init([]) ->
 id(Q) when ?is_amqqueue(Q) ->
     Policy = amqqueue:get_policy(Q),
     Q1 = rabbit_amqqueue:immutable(Q),
-    amqqueue:set_policy(Q1, Policy).
+    {simple_id(Q), amqqueue:set_policy(Q1, Policy)}.
+
+simple_id(Q) when ?is_amqqueue(Q) ->
+    #resource{virtual_host = VHost, name = Name} = amqqueue:get_name(Q),
+    [queue, VHost, Name].
