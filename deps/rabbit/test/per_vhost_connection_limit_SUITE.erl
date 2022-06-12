@@ -103,7 +103,8 @@ init_per_group(cluster_size_2_direct, Config) ->
     init_per_multinode_group(cluster_size_2_direct, Config1, 2);
 
 init_per_group(cluster_rename, Config) ->
-    init_per_multinode_group(cluster_rename, Config, 2).
+    Config1 = rabbit_ct_helpers:set_config(Config, [{connection_type, network}]),
+    init_per_multinode_group(cluster_rename, Config1, 2).
 
 init_per_multinode_group(Group, Config, NodeCount) ->
     Suffix = rabbit_ct_helpers:testcase_absname(Config, "", "-"),
@@ -449,6 +450,7 @@ single_node_single_vhost_limit_with(Config, WatermarkLimit) ->
     ?assertEqual(0, count_connections_in(Config, VHost)),
 
     [Conn1, Conn2, Conn3] = open_connections(Config, [0, 0, 0]),
+    ?awaitMatch(3, count_connections_in(Config, VHost), ?AWAIT, ?INTERVAL),
 
     %% we've crossed the limit
     expect_that_client_connection_is_rejected(Config, 0),
@@ -501,6 +503,8 @@ single_node_multiple_vhosts_limit(Config) ->
         {0, VHost1},
         {0, VHost2},
         {0, VHost2}]),
+    ?awaitMatch(2, count_connections_in(Config, VHost1), ?AWAIT, ?INTERVAL),
+    ?awaitMatch(2, count_connections_in(Config, VHost2), ?AWAIT, ?INTERVAL),
 
     %% we've crossed the limit
     expect_that_client_connection_is_rejected(Config, 0, VHost1),
@@ -606,11 +610,13 @@ cluster_single_vhost_limit2(Config) ->
 
     set_vhost_connection_limit(Config, VHost, 5),
 
-    [Conn3, Conn4, Conn5, {error, not_allowed}] = open_connections(Config, [
-        {1, VHost},
+    [Conn3, Conn4, Conn5] = open_connections(Config, [
         {1, VHost},
         {1, VHost},
         {1, VHost}]),
+    ?awaitMatch(5, count_connections_in(Config, VHost), ?AWAIT, ?INTERVAL),
+
+    [{error, not_allowed}] = open_connections(Config, [{1, VHost}]),
     ?awaitMatch(5, count_connections_in(Config, VHost), ?AWAIT, ?INTERVAL),
 
     close_connections([Conn1, Conn2, Conn3, Conn4, Conn5]),
@@ -686,8 +692,11 @@ vhost_limit_after_node_renamed(Config) ->
 
     ?assertEqual(0, count_connections_in(Config, VHost)),
 
-    [Conn1, Conn2, {error, not_allowed}] = open_connections(Config,
-      [{0, VHost}, {1, VHost}, {0, VHost}]),
+    [Conn1, Conn2] = open_connections(Config,
+      [{0, VHost}, {1, VHost}]),
+    ?awaitMatch(2, count_connections_in(Config, VHost), ?AWAIT, ?INTERVAL),
+    [{error, not_allowed}] = open_connections(Config,
+      [{0, VHost}]),
     ?awaitMatch(2, count_connections_in(Config, VHost), ?AWAIT, ?INTERVAL),
     close_connections([Conn1, Conn2]),
 
@@ -695,8 +704,9 @@ vhost_limit_after_node_renamed(Config) ->
 
     ?awaitMatch(0, count_connections_in(Config1, VHost), ?AWAIT, ?INTERVAL),
 
-    [Conn3, Conn4, {error, not_allowed}] = open_connections(Config1,
-      [{0, VHost}, {1, VHost}, {0, VHost}]),
+    [Conn3, Conn4] = open_connections(Config1, [{0, VHost}, {1, VHost}]),
+    ?awaitMatch(2, count_connections_in(Config1, VHost), ?AWAIT, ?INTERVAL),
+    [{error, not_allowed}] = open_connections(Config1, [{0, VHost}, {1, VHost}]),
     ?awaitMatch(2, count_connections_in(Config1, VHost), ?AWAIT, ?INTERVAL),
     close_connections([Conn3, Conn4]),
 

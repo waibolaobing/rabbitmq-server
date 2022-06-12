@@ -27,7 +27,7 @@
 -callback shutdown_tracked_items(list(), term()) -> ok.
 
 -export([id/2, count_tracked_items/4, match_tracked_items/2,
-         clear_tracking_table/1, delete_tracking_table/3,
+         clear_tracking_table/2, delete_tracking_table/3,
          delete_tracked_entry/3]).
 
 %%----------------------------------------------------------------------------
@@ -40,14 +40,13 @@ id(Node, Name) -> {Node, Name}.
 -spec count_tracked_items(function(), integer(), term(), string()) ->
     non_neg_integer().
 
-count_tracked_items(TableNameFun, CountRecPosition, Key, ContextMsg) ->
+count_tracked_items(Name, CountRecPosition, Key, ContextMsg) ->
     lists:foldl(fun (Node, Acc) ->
-                        Tab = TableNameFun(Node),
                         try
-                            N = case mnesia:dirty_read(Tab, Key) of
+                            N = case rabbit_store:lookup_tracked_item(Name, Node, Key) of
                                     []    -> 0;
-                                    [Val] ->
-                                        element(CountRecPosition, Val)
+                                    [Val] when is_integer(Val) -> Val;
+                                    [Val] -> element(CountRecPosition, Val)
                                 end,
                             Acc + N
                         catch _:Err  ->
@@ -60,44 +59,31 @@ count_tracked_items(TableNameFun, CountRecPosition, Key, ContextMsg) ->
 
 -spec match_tracked_items(function(), tuple()) -> term().
 
-match_tracked_items(TableNameFun, MatchSpec) ->
+match_tracked_items(Name, MatchSpec) ->
     lists:foldl(
         fun (Node, Acc) ->
-                Tab = TableNameFun(Node),
-                Acc ++ mnesia:dirty_match_object(
-                         Tab,
-                         MatchSpec)
+                Acc ++ rabbit_store:match_tracked_items(Name, Node, MatchSpec)
         end, [], rabbit_nodes:all_running()).
 
--spec clear_tracking_table(atom()) -> ok.
+-spec clear_tracking_table(atom(), atom()) -> ok.
 
-clear_tracking_table(TableName) ->
-    case mnesia:clear_table(TableName) of
-        {atomic, ok} -> ok;
-        {aborted, _} -> ok
-    end.
+clear_tracking_table(Name, Node) ->
+    rabbit_store:clear_tracking_table(Name, Node).
 
 -spec delete_tracking_table(atom(), node(), string()) -> ok.
 
-delete_tracking_table(TableName, Node, ContextMsg) ->
-    case mnesia:delete_table(TableName) of
-        {atomic, ok}              -> ok;
-        {aborted, {no_exists, _}} -> ok;
-        {aborted, Error} ->
-            rabbit_log:error("Failed to delete a ~p table for node ~p: ~p",
-                [ContextMsg, Node, Error]),
-            ok
-    end.
+delete_tracking_table(Name, Node, ContextMsg) ->
+    rabbit_store:delete_tracking_table(Name, Node, ContextMsg).
 
 -spec delete_tracked_entry({atom(), atom(), list()}, function(), term()) -> ok.
 
-delete_tracked_entry(_ExistsCheckSpec = {M, F, A}, TableNameFun, Key) ->
+delete_tracked_entry(_ExistsCheckSpec = {M, F, A}, TableName, Key) ->
     ClusterNodes = rabbit_nodes:all_running(),
     ExistsInCluster =
         lists:any(fun(Node) -> rpc:call(Node, M, F, A) end, ClusterNodes),
     case ExistsInCluster of
         false ->
-            [mnesia:dirty_delete(TableNameFun(Node), Key) || Node <- ClusterNodes];
+            [rabbit_store:delete_tracked_entry(TableName, Node, Key) || Node <- ClusterNodes];
         true ->
             ok
     end.

@@ -12,6 +12,8 @@
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("rabbitmq_ct_helpers/include/rabbit_assert.hrl").
 
+-define(TIMEOUT, 20000).
+
 -compile(export_all).
 
 all() ->
@@ -392,14 +394,17 @@ single_node_list_in_user(Config) ->
 
     [Conn1] = open_connections(Config, [{0, Username1}]),
     [Chan1] = open_channels(Conn1, 1),
-    [#tracked_connection{username = Username1}] = connections_in(Config, Username1),
-    [#tracked_channel{username = Username1}] = channels_in(Config, Username1),
+    ?awaitMatch([#tracked_connection{username = Username1}], connections_in(Config, Username1),
+                ?TIMEOUT),
+    ?awaitMatch([#tracked_channel{username = Username1}], channels_in(Config, Username1),
+                ?TIMEOUT),
     close_channels([Chan1]),
     rabbit_ct_helpers:await_condition(
         fun () ->
             length(channels_in(Config, Username1)) =:= 0
         end),
     close_connections([Conn1]),
+
     rabbit_ct_helpers:await_condition(
         fun () ->
             length(connections_in(Config, Username1)) =:= 0
@@ -407,26 +412,40 @@ single_node_list_in_user(Config) ->
 
     [Conn2] = open_connections(Config, [{0, Username2}]),
     [Chan2] = open_channels(Conn2, 1),
-    [#tracked_connection{username = Username2}] = connections_in(Config, Username2),
-    [#tracked_channel{username = Username2}] = channels_in(Config, Username2),
+    
+    ?awaitMatch([#tracked_connection{username = Username2}], connections_in(Config, Username2),
+                ?TIMEOUT),
+    ?awaitMatch([#tracked_channel{username = Username2}], channels_in(Config, Username2),
+                ?TIMEOUT),
 
     [Conn3] = open_connections(Config, [{0, Username1}]),
     [Chan3] = open_channels(Conn3, 1),
-    [#tracked_connection{username = Username1}] = connections_in(Config, Username1),
-    [#tracked_channel{username = Username1}] = channels_in(Config, Username1),
+    ?awaitMatch([#tracked_connection{username = Username1}], connections_in(Config, Username1),
+                ?TIMEOUT),
+    ?awaitMatch([#tracked_channel{username = Username1}], channels_in(Config, Username1),
+                ?TIMEOUT),
 
     [Conn4] = open_connections(Config, [{0, Username1}]),
     [_Chan4] = open_channels(Conn4, 1),
+    ?awaitMatch([#tracked_connection{username = Username1},
+                 #tracked_connection{username = Username1}], connections_in(Config, Username1),
+                ?TIMEOUT),
+    ?awaitMatch([#tracked_channel{username = Username1},
+                 #tracked_channel{username = Username1}], channels_in(Config, Username1),
+                ?TIMEOUT),
     close_connections([Conn4]),
-    [#tracked_connection{username = Username1}] = connections_in(Config, Username1),
-    [#tracked_channel{username = Username1}] = channels_in(Config, Username1),
-
+    ?awaitMatch([#tracked_connection{username = Username1}], connections_in(Config, Username1),
+                ?TIMEOUT),
+    ?awaitMatch([#tracked_channel{username = Username1}], channels_in(Config, Username1),
+                ?TIMEOUT),
     [Conn5, Conn6] = open_connections(Config, [{0, Username2}, {0, Username2}]),
     [Chan5] = open_channels(Conn5, 1),
     [Chan6] = open_channels(Conn6, 1),
+    ?awaitMatch(4, length(all_connections(Config)), ?TIMEOUT),
     [<<"guest1">>, <<"guest2">>] =
       lists:usort(lists:map(fun (#tracked_connection{username = V}) -> V end,
                      all_connections(Config))),
+    ?awaitMatch(4, length(all_channels(Config)), ?TIMEOUT),
     [<<"guest1">>, <<"guest2">>] =
       lists:usort(lists:map(fun (#tracked_channel{username = V}) -> V end,
                       all_channels(Config))),
@@ -448,31 +467,23 @@ single_node_list_in_user(Config) ->
 
 most_basic_cluster_connection_and_channel_count(Config) ->
     Username = proplists:get_value(rmq_username, Config),
-    rabbit_ct_helpers:await_condition(
-        fun () ->
-            count_connections_of_user(Config, Username) =:= 0 andalso
-            count_channels_of_user(Config, Username) =:= 0
-        end),
+    ?awaitMatch(0, count_connections_of_user(Config, Username), ?TIMEOUT),
+    ?awaitMatch(0, count_channels_of_user(Config, Username), ?TIMEOUT),
 
     [Conn1] = open_connections(Config, [0]),
     Chans1 = [_|_] = open_channels(Conn1, 5),
-    rabbit_ct_helpers:await_condition(
-        fun () ->
-            count_connections_of_user(Config, Username) =:= 1 andalso
-            count_channels_of_user(Config, Username) =:= 5
-        end),
-    ?assertEqual(1, count_connections_of_user(Config, Username)),
-    ?assertEqual(5, count_channels_of_user(Config, Username)),
+    ?awaitMatch(1, count_connections_of_user(Config, Username), ?TIMEOUT),
+    ?awaitMatch(5, count_channels_of_user(Config, Username), ?TIMEOUT),
 
     [Conn2] = open_connections(Config, [1]),
     Chans2 = [_|_] = open_channels(Conn2, 5),
-    ?assertEqual(2, count_connections_of_user(Config, Username)),
-    ?assertEqual(10, count_channels_of_user(Config, Username)),
+    ?awaitMatch(2, count_connections_of_user(Config, Username), ?TIMEOUT),
+    ?awaitMatch(10, count_channels_of_user(Config, Username), ?TIMEOUT),
 
     [Conn3] = open_connections(Config, [1]),
     Chans3 = [_|_] = open_channels(Conn3, 5),
-    ?assertEqual(3, count_connections_of_user(Config, Username)),
-    ?assertEqual(15, count_channels_of_user(Config, Username)),
+    ?awaitMatch(3, count_connections_of_user(Config, Username), ?TIMEOUT),
+    ?awaitMatch(15, count_channels_of_user(Config, Username), ?TIMEOUT),
 
     close_channels(Chans1 ++ Chans2 ++ Chans3),
     ?awaitMatch(0, count_channels_of_user(Config, Username), 60000, 3000),
@@ -812,6 +823,7 @@ single_node_single_user_limit_with(Config, ConnLimit, ChLimit) ->
 
     [Conn1, Conn2, Conn3] = Conns1 = open_connections(Config, [0, 0, 0]),
     [_Chans1, Chans2, Chans3] = [open_channels(Conn, 5) || Conn <- Conns1],
+    ?awaitMatch(15, length(all_channels(Config)), ?TIMEOUT),
 
     %% we've crossed the limit
     expect_that_client_connection_is_rejected(Config, 0),
@@ -829,6 +841,7 @@ single_node_single_user_limit_with(Config, ConnLimit, ChLimit) ->
     set_user_connection_and_channel_limit(Config, Username, ConnLimit, ChLimit),
     [Conn4, Conn5] = Conns2 = open_connections(Config, [0, 0]),
     [Chans4, Chans5] = [open_channels(Conn, 5) || Conn <- Conns2],
+    ?awaitMatch(20, length(all_channels(Config)), ?TIMEOUT),
 
     close_channels(Chans2 ++ Chans3 ++ Chans4 ++ Chans5),
     rabbit_ct_helpers:await_condition(
@@ -898,6 +911,7 @@ single_node_single_user_clear_limits(Config) ->
 
     [Conn1, Conn2, Conn3] = Conns1 = open_connections(Config, [0, 0, 0]),
     [_Chans1, Chans2, Chans3] = [open_channels(Conn, 5) || Conn <- Conns1],
+    ?awaitMatch(15, length(all_channels(Config)), ?TIMEOUT),
 
     %% we've crossed the limit
     expect_that_client_connection_is_rejected(Config, 0),
@@ -915,6 +929,7 @@ single_node_single_user_clear_limits(Config) ->
     %% reach limit again
     [Conn4] = open_connections(Config, [{0, Username}]),
     Chans4 = [_|_] = open_channels(Conn4, 5),
+
     rabbit_ct_helpers:await_condition(
         fun () ->
             count_connections_of_user(Config, Username) =:= 3 andalso
@@ -925,6 +940,7 @@ single_node_single_user_clear_limits(Config) ->
 
     [Conn5, Conn6, Conn7] = Conns2 = open_connections(Config, [0, 0, 0]),
     [Chans5, Chans6, Chans7] = [open_channels(Conn, 5) || Conn <- Conns2],
+    ?awaitMatch(30, length(all_channels(Config)), ?TIMEOUT),
 
     close_channels(Chans2 ++ Chans3 ++ Chans4 ++ Chans5 ++ Chans6 ++ Chans7),
     rabbit_ct_helpers:await_condition(
@@ -1036,6 +1052,7 @@ single_node_multiple_users_limit(Config) ->
         {0, Username2}]),
 
     [_Chans1, Chans2, Chans3, Chans4] = [open_channels(Conn, 5) || Conn <- Conns1],
+    ?awaitMatch(20, length(all_channels(Config)), ?TIMEOUT),
 
     %% we've crossed the limit
     expect_that_client_connection_is_rejected(Config, 0, Username1),
@@ -1049,6 +1066,7 @@ single_node_multiple_users_limit(Config) ->
 
     [Conn5] = open_connections(Config, [0]),
     Chans5 = [_|_] = open_channels(Conn5, 5),
+    ?awaitMatch(20, length(all_channels(Config)), ?TIMEOUT),
 
     set_user_connection_and_channel_limit(Config, Username1, 5, 25),
     set_user_connection_and_channel_limit(Config, Username2, -10, -50),
@@ -1061,6 +1079,7 @@ single_node_multiple_users_limit(Config) ->
         {0, Username2}]),
 
     [Chans6, Chans7, Chans8, Chans9, Chans10] = [open_channels(Conn, 5) || Conn <- Conns2],
+    ?awaitMatch(45, length(all_channels(Config)), ?TIMEOUT),
 
     close_channels(Chans2 ++ Chans3 ++ Chans4 ++ Chans5 ++ Chans6 ++
                    Chans7 ++ Chans8 ++ Chans9 ++ Chans10),
@@ -1177,6 +1196,7 @@ cluster_single_user_limit(Config) ->
     %% here connections and channels are opened to different nodes
     [Conn1, Conn2] = Conns1 = open_connections(Config, [{0, Username}, {1, Username}]),
     [_Chans1, Chans2] = [open_channels(Conn, 5) || Conn <- Conns1],
+    ?awaitMatch(10, length(all_channels(Config)), ?TIMEOUT),
 
     %% we've crossed the limit
     expect_that_client_connection_is_rejected(Config, 0, Username),
@@ -1192,6 +1212,7 @@ cluster_single_user_limit(Config) ->
 
     [Conn3, Conn4] = Conns2 = open_connections(Config, [{0, Username}, {0, Username}]),
     [Chans3, Chans4] = [open_channels(Conn, 5) || Conn <- Conns2],
+    ?awaitMatch(15, length(all_channels(Config)), ?TIMEOUT),
 
     close_channels(Chans2 ++ Chans3 ++ Chans4),
     ?awaitMatch(0, count_channels_of_user(Config, Username), 60000, 3000),
@@ -1211,6 +1232,8 @@ cluster_single_user_limit2(Config) ->
     %% here a limit is reached on one node first
     [Conn1, Conn2] = Conns1 = open_connections(Config, [{0, Username}, {0, Username}]),
     [_Chans1, Chans2] = [open_channels(Conn, 5) || Conn <- Conns1],
+    ?awaitMatch(2, length(all_connections(Config)), ?TIMEOUT),
+    ?awaitMatch(10, length(all_channels(Config)), ?TIMEOUT),
 
     %% we've crossed the limit
     expect_that_client_connection_is_rejected(Config, 0, Username),
@@ -1221,18 +1244,23 @@ cluster_single_user_limit2(Config) ->
             is_process_alive(Conn1) =:= false andalso
             is_process_alive(Conn2) =:= true
         end),
+    ?awaitMatch(1, length(all_connections(Config)), ?TIMEOUT),
+    ?awaitMatch(5, length(all_channels(Config)), ?TIMEOUT),
 
     set_user_connection_and_channel_limit(Config, Username, 5, 25),
 
-    [Conn3, Conn4, Conn5, Conn6, {error, not_allowed}] = open_connections(Config, [
-        {1, Username},
+    [Conn3, Conn4, Conn5, Conn6] = open_connections(Config, [
         {1, Username},
         {1, Username},
         {1, Username},
         {1, Username}]),
+    ?awaitMatch(5, length(all_connections(Config)), ?TIMEOUT),
+
+    [{error, not_allowed}] = open_connections(Config, [{1, Username}]),
 
     [Chans3, Chans4, Chans5, Chans6, [{error, not_allowed}]] =
         [open_channels(Conn, 1) || Conn <- [Conn3, Conn4, Conn5, Conn6, Conn1]],
+    ?awaitMatch(9, length(all_channels(Config)), ?TIMEOUT),
 
     close_channels(Chans2 ++ Chans3 ++ Chans4 ++ Chans5 ++ Chans6),
     rabbit_ct_helpers:await_condition(
@@ -1304,6 +1332,8 @@ cluster_single_user_clear_limits(Config) ->
     %% here a limit is reached on one node first
     [Conn1, Conn2] = Conns1 = open_connections(Config, [{0, Username}, {0, Username}]),
     [_Chans1, Chans2] = [open_channels(Conn, 5) || Conn <- Conns1],
+    ?awaitMatch(2, length(all_connections(Config)), ?TIMEOUT),
+    ?awaitMatch(10, length(all_channels(Config)), ?TIMEOUT),
 
     %% we've crossed the limit
     expect_that_client_connection_is_rejected(Config, 0, Username),
@@ -1325,6 +1355,7 @@ cluster_single_user_clear_limits(Config) ->
 
     [Chans3, Chans4, Chans5, Chans6, Chans7] =
         [open_channels(Conn, 1) || Conn <- [Conn3, Conn4, Conn5, Conn6, Conn7]],
+    ?awaitMatch(10, length(all_channels(Config)), ?TIMEOUT),
 
     close_channels(Chans2 ++ Chans3 ++ Chans4 ++ Chans5 ++ Chans6 ++ Chans7),
     rabbit_ct_helpers:await_condition(

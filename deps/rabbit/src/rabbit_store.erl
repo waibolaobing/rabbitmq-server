@@ -76,6 +76,16 @@
 -export([list_exchanges_in_khepri_tx/1,
          lookup_queue_in_khepri_tx/1]).
 
+-export([clear_tracking_table/2,
+         delete_tracking_table/3,
+         delete_tracked_entry/3,
+         lookup_tracked_item/3,
+         match_tracked_items/3,
+         create_tracking_table/4,
+         add_tracked_item/5,
+         delete_tracked_item/4,
+         count_tracked_items/2]).
+
 -define(WAIT_SECONDS, 30).
 
 %% Paths
@@ -139,6 +149,17 @@ khepri_listeners_path() ->
 
 khepri_exchange_type_topic_path(#resource{virtual_host = VHost, name = Name}) ->
     [?MODULE, topic_trie_binding, VHost, Name].
+
+%% Tracking tables
+
+tracked_table_name_for(Name, Node) ->
+    list_to_atom(rabbit_misc:format("~s_~s", [Name, Node])).
+
+khepri_tracking_path(Name, Node) ->
+    [?MODULE, tracking, Name, Node].
+
+khepri_tracking_path(Name, Node, Key) ->
+    [?MODULE, tracking, Name, Node] ++ Key.
 
 %% API
 %% --------------------------------------------------------------
@@ -938,23 +959,19 @@ delete_listener(#listener{node = Node} = Listener) ->
               rabbit_khepri:transaction(
                 fun() ->
                         Path = khepri_listener_path(Node),
-                        case khepri_tx:get_data(Path) of
-                            {ok, Set0} ->
-                                Set = sets:del_element(Listener, Set0),
-                                case sets:is_empty(Set) of
-                                    true ->
-                                        case khepri_tx:delete(Path) of
-                                            {ok, _} -> ok;
-                                            Error -> khepri_tx:abort(Error)
-                                        end;
-                                    false ->
-                                        case khepri_tx:put(Path, Set) of
-                                            {ok, _} -> ok;
-                                            Error -> khepri_tx:abort(Error)
-                                        end
+                        Set0 = khepri_tx:get_data(Path),
+                        Set = sets:del_element(Listener, Set0),
+                        case sets:is_empty(Set) of
+                            true ->
+                                case khepri_tx:delete(Path) of
+                                    {ok, _} -> ok;
+                                    Error -> khepri_tx:abort(Error)
                                 end;
-                            _ ->
-                                ok
+                            false ->
+                                case khepri_tx:put(Path, Set) of
+                                    {ok, _} -> ok;
+                                    Error -> khepri_tx:abort(Error)
+                                end
                         end
                 end)
       end).
@@ -1061,6 +1078,176 @@ delete_topic_trie_bindings(Bs) ->
                end || {Path, Binding} <- Data]
       end, rw),
     ok.
+
+clear_tracking_table(Name, Node) ->
+    rabbit_khepri:try_mnesia_or_khepri(
+      fun() ->
+              TableName = tracked_table_name_for(Name, Node),
+              case mnesia:clear_table(TableName) of
+                  {atomic, ok} -> ok;
+                  {aborted, _} -> ok
+              end
+      end,
+      fun() ->
+              Path = khepri_tracking_path(Name, Node),
+              {ok, _} = rabbit_khepri:delete(Path),
+              ok
+      end).
+
+delete_tracking_table(Name, Node, ContextMsg) ->
+    rabbit_khepri:try_mnesia_or_khepri(
+      fun() ->
+              TableName = tracked_table_name_for(Name, Node),
+              case mnesia:delete_table(TableName) of
+                  {atomic, ok}              -> ok;
+                  {aborted, {no_exists, _}} -> ok;
+                  {aborted, Error} ->
+                      rabbit_log:error("Failed to delete a ~p table for node ~p: ~p",
+                                       [ContextMsg, Node, Error]),
+                      ok
+              end
+      end,
+      fun() ->
+              Path = khepri_tracking_path(Name, Node),
+              {ok, _} = rabbit_khepri:delete(Path),
+              ok
+      end).
+
+delete_tracked_entry(Name, Node, Key) ->
+    rabbit_khepri:try_mnesia_or_khepri(
+      fun() ->
+              TableName = tracked_table_name_for(Name, Node),
+              mnesia:dirty_delete(TableName, Key)
+      end,
+      fun() ->
+              Path = khepri_tracking_path(Name, Node, as_list(Key)),
+              {ok, _} = rabbit_khepri:delete(Path),
+              ok
+      end).
+
+lookup_tracked_item(Name, Node, Key) ->
+    rabbit_khepri:try_mnesia_or_khepri(
+      fun() ->
+              TableName = tracked_table_name_for(Name, Node),
+              mnesia:dirty_read(TableName, Key)
+      end,
+      fun() ->
+              Path = khepri_tracking_path(Name, Node, as_list(Key)),
+              case rabbit_khepri:get_data(Path) of
+                  {ok, Data} -> [Data];
+                  _ -> []
+              end
+      end).
+
+match_tracked_items(Name, Node, Pattern) ->
+    rabbit_khepri:try_mnesia_or_khepri(
+      fun() ->
+              TableName = tracked_table_name_for(Name, Node),
+              list_in_mnesia(TableName, Pattern)
+      end,
+      fun() ->
+              Path = khepri_tracking_path(Name, Node),
+              list_in_khepri(Path ++ [?STAR_STAR, #if_data_matches{pattern = Pattern}])
+      end).
+
+create_tracking_table(Name, Node, RecordName, RecordInfo) ->
+    rabbit_khepri:try_mnesia_or_khepri(
+      fun() ->
+              TableName = tracked_table_name_for(Name, Node),
+              case mnesia:create_table(TableName, [{record_name, RecordName},
+                                                   {attributes, RecordInfo}]) of
+                  {atomic, ok}                   -> ok;
+                  {aborted, {already_exists, _}} -> ok;
+                  {aborted, Error}               ->
+                      rabbit_log:error("Failed to create a ~p table for node ~p: ~p", [Name, Node, Error]),
+                      ok
+              end
+      end,
+      fun() ->
+              ok
+      end).
+
+add_tracked_item(Name, Node, Key, Item, Counters) ->
+    rabbit_khepri:try_mnesia_or_khepri(
+      fun() ->
+              TableName = tracked_table_name_for(Name, Node),
+              case mnesia:dirty_read(TableName, Key) of
+                  [] ->
+                      mnesia:dirty_write(TableName, Item),
+                      [begin
+                           TableName0 = tracked_table_name_for(CTable, Node),
+                           mnesia:dirty_update_counter(TableName0, CKey, 1)
+                       end || {CTable, CKey} <- Counters],
+                      ok;
+                  _ ->
+                      ok
+              end
+      end,
+      fun() ->
+              Path = khepri_tracking_path(Name, Node, as_list(Key)),
+              rabbit_khepri:transaction(
+                fun() ->
+                        case khepri_tx:get(Path) of
+                            {ok, #{Path := _}} ->
+                                ok;
+                            _ ->
+                                {ok, _} = khepri_tx:put(Path, Item),
+                                [begin
+                                     Path0 = khepri_tracking_path(CTable, Node, as_list(CKey)),
+                                     Value = case khepri_tx:get(Path0) of
+                                                 {ok, #{Path0 := #{data := V}}} -> V;
+                                                 _ -> 0
+                                             end,
+                                     {ok, _} = khepri_tx:put(Path0, Value + 1)
+                                 end || {CTable, CKey} <- Counters],
+                                ok
+                        end
+                end)
+      end).
+
+delete_tracked_item(Name, Node, Key, Counters) ->
+    rabbit_khepri:try_mnesia_or_khepri(
+      fun() ->
+              TableName = tracked_table_name_for(Name, Node),
+              case mnesia:dirty_read(TableName, Key) of
+                  [] ->
+                      ok;
+                  [Record] ->
+                      [begin
+                           TableName0 = tracked_table_name_for(CTable, Node),
+                           mnesia:dirty_update_counter(TableName0, CKeyFun(Record), -1)
+                       end || {CTable, CKeyFun} <- Counters],
+                      mnesia:dirty_delete(TableName, Key),
+                      ok
+              end
+      end,
+     fun() ->
+             Path = khepri_tracking_path(Name, Node, as_list(Key)),
+             rabbit_khepri:transaction(
+               fun() ->
+                       case khepri_tx:get(Path) of
+                           {ok, #{Path := #{data := Record}}} ->
+                               [begin
+                                    Path0 = khepri_tracking_path(CTable, Node, as_list(CKeyFun(Record))),
+                                    Value = khepri_tx:get_data(Path0),
+                                    {ok, _} = khepri_tx:put(Path0, Value - 1)
+                                end || {CTable, CKeyFun} <- Counters],
+                               {ok, _} = khepri_tx:delete(Path),
+                               ok;
+                           _ ->
+                               ok
+                       end
+               end)
+     end).
+
+count_tracked_items(Name, Node) ->
+    rabbit_khepri:try_mnesia_or_khepri(
+      fun() ->
+              count_in_mnesia(tracked_table_name_for(Name, Node))
+      end,
+      fun() ->
+              count_in_khepri(khepri_tracking_path(Name, Node))
+      end).
 
 %% Feature flags
 %% --------------------------------------------------------------
@@ -2329,3 +2516,8 @@ retry(Fun, Until) ->
                     retry(Fun, Until)
             end
     end.
+
+as_list(T) when is_tuple(T) ->
+    tuple_to_list(T);
+as_list(Any) ->
+    [Any].
