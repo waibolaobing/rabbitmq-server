@@ -52,9 +52,9 @@
          list_global/0, list_global_formatted/0, list_global_formatted/2,
          lookup_global/1, global_info_keys/0, clear_global/2]).
 
--export([clear_data_in_khepri/0,
-         mnesia_write_to_khepri/1,
-         mnesia_delete_to_khepri/1]).
+-export([clear_data_in_khepri/2,
+         mnesia_write_to_khepri/3,
+         mnesia_delete_to_khepri/3]).
 
 -export([list_in_khepri_tx/2]).
 
@@ -598,37 +598,37 @@ khepri_global_rp_path(Key) ->
 khepri_vhost_rp_path(VHost, Component, Name) ->
     [?MODULE, per_vhost, VHost, Component, Name].
 
-clear_data_in_khepri() ->
+clear_data_in_khepri(rabbit_runtime_parameters, _ExtraArgs) ->
     Path = khepri_rp_path(),
     case rabbit_khepri:delete(Path) of
         {ok, _} -> ok;
         Error -> throw(Error)
     end.
 
-mnesia_write_to_khepri(
-  #runtime_parameters{key = {VHost, Comp, Name}} = RuntimeParam) ->
+mnesia_write_to_khepri(rabbit_runtime_parameters,
+  #runtime_parameters{key = {VHost, Comp, Name}} = RuntimeParam, _ExtraArgs) ->
     Path = khepri_vhost_rp_path(VHost, Comp, Name),
     case rabbit_khepri:put(Path, RuntimeParam) of
         {ok, _} -> ok;
         Error -> throw(Error)
     end;
-mnesia_write_to_khepri(
-  #runtime_parameters{key = Key} = RuntimeParam) ->
+mnesia_write_to_khepri(rabbit_runtime_parameters,
+  #runtime_parameters{key = Key} = RuntimeParam, _ExtraArgs) ->
     Path = khepri_global_rp_path(Key),
     case rabbit_khepri:put(Path, RuntimeParam) of
         {ok, _} -> ok;
         Error -> throw(Error)
     end.
 
-mnesia_delete_to_khepri(
-  #runtime_parameters{key = {VHost, Comp, Name}}) ->
+mnesia_delete_to_khepri(rabbit_runtime_parameters,
+  #runtime_parameters{key = {VHost, Comp, Name}}, _ExtraArgs) ->
     Path = khepri_vhost_rp_path(VHost, Comp, Name),
     case rabbit_khepri:delete(Path) of
         {ok, _} -> ok;
         Error -> throw(Error)
     end;
-mnesia_delete_to_khepri(
-  #runtime_parameters{key = Key}) ->
+mnesia_delete_to_khepri(rabbit_runtime_parameters,
+  #runtime_parameters{key = Key}, _ExtraArgs) ->
     Path = khepri_global_rp_path(Key),
     case rabbit_khepri:delete(Path) of
         {ok, _} -> ok;

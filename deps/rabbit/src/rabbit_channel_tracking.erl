@@ -29,10 +29,22 @@
 -export([list/0, list_of_user/1, list_on_node/1,
          delete_tracked_channel_user_entry/1]).
 
+-export([mds_tables/0]).
+
 -include_lib("rabbit_common/include/rabbit.hrl").
 
 -define(TRACKED_CHANNEL_ON_NODE, tracked_channel_on_node).
 -define(TRACKED_CHANNEL_PER_USER_ON_NODE, tracked_channel_table_per_user_on_node).
+
+-define(MDS_TABLES, [{?TRACKED_CHANNEL_ON_NODE,
+                      #{type => tracking,
+                        name => ?TRACKED_CHANNEL_ON_NODE,
+                        key => #tracked_channel.id}},
+                     {?TRACKED_CHANNEL_PER_USER_ON_NODE,
+                      #{type => tracking_counter,
+                        name => ?TRACKED_CHANNEL_PER_USER_ON_NODE,
+                        key => #tracked_channel_per_user.user,
+                        counter => #tracked_channel_per_user.channel_count}}]).
 
 -import(rabbit_misc, [pget/2]).
 
@@ -201,6 +213,11 @@ list_on_node(Node) ->
           #tracked_channel{_ = '_'})
     catch exit:{aborted, {no_exists, _}} -> []
     end.
+
+mds_tables() ->
+    lists:flatten(
+      [[{rabbit_store:tracked_table_name_for(Name, Node), rabbit_store, ExtraArgs#{node => Node}}
+        || {Name, ExtraArgs} <- ?MDS_TABLES] || Node <- rabbit_nodes:all_running()]).
 
 %% internal
 ensure_tracked_channels_table_for_this_node() ->

@@ -17,7 +17,8 @@
 all() ->
     [
      {group, mnesia_store},
-     {group, khepri_store}
+     {group, khepri_store},
+     {group, khepri_migration}
     ].
 
 groups() ->
@@ -60,7 +61,8 @@ groups() ->
                          {cluster_rename, [], [
                                                vhost_limit_after_node_renamed
                                               ]}
-                        ]}
+                        ]},
+     {khepri_migration, [], [from_mnesia_to_khepri]}
     ].
 
 suite() ->
@@ -89,6 +91,9 @@ init_per_group(mnesia_store, Config) ->
     Config;
 init_per_group(khepri_store, Config) ->
     rabbit_ct_helpers:set_config(Config, [{metadata_store, khepri}]);
+init_per_group(khepri_migration, Config) ->
+    Config1 = rabbit_ct_helpers:set_config(Config, [{connection_type, network}]),
+    init_per_multinode_group(cluster_size_1_network, Config1, 1);
 init_per_group(cluster_size_1_network, Config) ->
     Config1 = rabbit_ct_helpers:set_config(Config, [{connection_type, network}]),
     init_per_multinode_group(cluster_size_1_network, Config1, 1);
@@ -123,7 +128,7 @@ init_per_multinode_group(Group, Config, NodeCount) ->
     end.
 
 end_per_group(Group, Config) when Group == cluster_rename; Group == mnesia_store;
-                                  Group == khepri_store ->
+                                  Group == khepri_store; Group == khepri_migration ->
     % The broker is managed by {init,end}_per_testcase().
     Config;
 end_per_group(_Group, Config) ->
@@ -712,6 +717,18 @@ vhost_limit_after_node_renamed(Config) ->
 
     set_vhost_connection_limit(Config1, VHost,  -1),
     {save_config, Config1}.
+
+from_mnesia_to_khepri(Config) ->
+    VHost = <<"/">>,
+    ?assertEqual(0, count_connections_in(Config, VHost)),
+    [Conn] = open_connections(Config, [0]),
+    ?awaitMatch(1, count_connections_in(Config, VHost), ?AWAIT, ?INTERVAL),
+    case rabbit_ct_broker_helpers:enable_feature_flag(Config, raft_based_metadata_store_phase1) of
+        ok ->
+            ?awaitMatch(1, count_connections_in(Config, VHost), ?AWAIT, ?INTERVAL);
+        Skip ->
+            Skip
+    end.
  
 %% -------------------------------------------------------------------
 

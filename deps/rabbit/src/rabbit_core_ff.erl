@@ -22,7 +22,8 @@
          virtual_host_metadata_migration/3,
          maintenance_mode_status_migration/3,
          user_limits_migration/3,
-         mds_phase1_migration/3]).
+         mds_phase1_migration/3,
+         mds_migration/4]).
 
 -rabbit_feature_flag(
    {quorum_queue,
@@ -246,45 +247,52 @@ user_limits_migration(_FeatureName, _FeatureProps, post_enabled_locally) ->
 %% both vhosts and users to exist in the metadata store.
 
 %% TODO should they be integrated on phase1?
--define(MDS_PHASE2_TABLES, [rabbit_durable_route,
-                            rabbit_semi_durable_route,
-                            rabbit_route,
-                            rabbit_reverse_route,
-                            rabbit_topic_trie_node,
-                            rabbit_topic_trie_edge,
-                            rabbit_topic_trie_binding,
-                            rabbit_listener]).
+-define(MDS_PHASE2_TABLES, [{rabbit_queue, rabbit_store, #{}},
+                            {rabbit_durable_queue, rabbit_store, #{}},
+                            {rabbit_exchange, rabbit_store, #{}},
+                            {rabbit_durable_exchange, rabbit_store, #{}},
+                            {rabbit_exchange_serial, rabbit_store, #{}},
+                            {rabbit_route, rabbit_store, #{}},
+                            {rabbit_durable_route, rabbit_store, #{}},
+                            {rabbit_semi_durable_route, rabbit_store, #{}},
+                            {rabbit_reverse_route, rabbit_store, #{}},
+                            {rabbit_topic_trie_binding, rabbit_store, #{}},
+                            {rabbit_topic_trie_node, rabbit_store, #{}},
+                            {rabbit_topic_trie_edge, rabbit_store, #{}},
+                            {rabbit_listener, rabbit_store, #{}}]).
 
--define(MDS_PHASE1_TABLES, [rabbit_vhost,
-                            rabbit_user,
-                            rabbit_user_permission,
-                            rabbit_topic_permission,
-                            rabbit_runtime_parameters,
-                            rabbit_queue,
-                            rabbit_durable_queue,
-                            rabbit_exchange,
-                            rabbit_durable_exchange,
-                            rabbit_exchange_serial] ++ ?MDS_PHASE2_TABLES).
+-define(MDS_PHASE1_TABLES, [{rabbit_vhost, rabbit_vhost, #{}},
+                            {rabbit_user, rabbit_auth_backend_internal, #{}},
+                            {rabbit_user_permission, rabbit_auth_backend_internal, #{}},
+                            {rabbit_topic_permission, rabbit_auth_backend_internal, #{}},
+                            {rabbit_runtime_parameters, rabbit_runtime_parameters, #{}}]
+        ++ ?MDS_PHASE2_TABLES).
 
-mds_phase1_migration(_FeatureName, _FeatureProps, is_enabled) ->
+mds_phase1_migration(FeatureName, FeatureProps, IsEnabled) ->
+    %% Channel and connection tracking are core features with difference:
+    %% tables cannot be predeclared as they include the node name
+    Tables = ?MDS_PHASE1_TABLES ++ rabbit_connection_tracking:mds_tables()
+        ++ rabbit_channel_tracking:mds_tables(),
+    mds_migration(FeatureName, FeatureProps, Tables, IsEnabled).
+
+mds_migration(_FeatureName, _FeatureProps, _TablesAndOwners, is_enabled) ->
     %% We don't check if the migration was done already because we also need
     %% to make sure the cluster membership of Khepri matches the Mnesia
     %% cluster.
     undefined;
-mds_phase1_migration(FeatureName, _FeatureProps, enable) ->
+mds_migration(FeatureName, _FeatureProps, TablesAndOwners, enable) ->
     case ensure_khepri_cluster_matches_mnesia(FeatureName) of
         ok ->
-            Tables = ?MDS_PHASE1_TABLES,
             case is_mds_migration_done(FeatureName) of
-                false -> migrate_tables_to_khepri(FeatureName, Tables);
+                false -> migrate_tables_to_khepri(FeatureName, TablesAndOwners);
                 true  -> ok
             end;
         Error ->
             Error
     end;
-mds_phase1_migration(FeatureName, _FeatureProps, post_enabled_locally) ->
+mds_migration(FeatureName, _FeatureProps, TablesAndOwners, post_enabled_locally) ->
     ?assert(rabbit_khepri:is_enabled(non_blocking)),
-    Tables = ?MDS_PHASE1_TABLES,
+    {Tables, _, _} = lists:unzip3(TablesAndOwners),
     empty_unused_mnesia_tables(FeatureName, Tables).
 
 ensure_khepri_cluster_matches_mnesia(FeatureName) ->
@@ -436,7 +444,8 @@ khepri_cluster_on_node(Node) ->
     lists:sort(
       rabbit_misc:rpc_call(Node, rabbit_khepri, nodes_if_khepri_enabled, [])).
 
-migrate_tables_to_khepri(FeatureName, Tables) ->
+migrate_tables_to_khepri(FeatureName, TablesAndOwners) ->
+    {Tables, _, _} = lists:unzip3(TablesAndOwners),
     rabbit_table:wait(Tables, _Retry = true),
     ?LOG_NOTICE(
        "Feature flag `~s`:   starting migration from Mnesia "
@@ -445,7 +454,7 @@ migrate_tables_to_khepri(FeatureName, Tables) ->
        [FeatureName]),
     Pid = spawn(
             fun() ->
-                    migrate_tables_to_khepri_run(FeatureName, Tables)
+                    migrate_tables_to_khepri_run(FeatureName, TablesAndOwners)
             end),
     MonitorRef = erlang:monitor(process, Pid),
     receive
@@ -463,7 +472,7 @@ migrate_tables_to_khepri(FeatureName, Tables) ->
             {error, {migration_failure, Info}}
     end.
 
-migrate_tables_to_khepri_run(FeatureName, Tables) ->
+migrate_tables_to_khepri_run(FeatureName, TablesAndOwners) ->
     %% Clear data in Khepri which could come from a previously aborted copy
     %% attempt. The table list order is important so we need to reverse that
     %% order to clear the data.
@@ -471,8 +480,9 @@ migrate_tables_to_khepri_run(FeatureName, Tables) ->
        "Feature flag `~s`:   clear data from any aborted migration attempts "
        "(if any)",
        [FeatureName]),
-    ok = clear_data_from_previous_attempt(FeatureName, lists:reverse(Tables)),
+    ok = clear_data_from_previous_attempt(FeatureName, lists:reverse(TablesAndOwners)),
 
+    {Tables, _, _} = lists:unzip3(TablesAndOwners),
     %% Subscribe to Mnesia events: we want to know about all writes and
     %% deletions happening in parallel to the copy we are about to start.
     ?LOG_DEBUG(
@@ -485,13 +495,13 @@ migrate_tables_to_khepri_run(FeatureName, Tables) ->
     ?LOG_DEBUG(
        "Feature flag `~s`:   copy records from Mnesia to Khepri",
        [FeatureName]),
-    ok = copy_from_mnesia_to_khepri(FeatureName, Tables),
+    ok = copy_from_mnesia_to_khepri(FeatureName, TablesAndOwners),
 
     %% Mnesia transaction to handle received Mnesia events and tables removal.
     ?LOG_DEBUG(
        "Feature flag `~s`:   final sync and Mnesia table removal",
        [FeatureName]),
-    ok = final_sync_from_mnesia_to_khepri(FeatureName, Tables),
+    ok = final_sync_from_mnesia_to_khepri(FeatureName, TablesAndOwners),
 
     %% Unsubscribe to Mnesia events. All Mnesia tables are synchronized and
     %% read-only at this point.
@@ -501,72 +511,8 @@ migrate_tables_to_khepri_run(FeatureName, Tables) ->
     ok = unsubscribe_to_mnesia_changes(FeatureName, Tables).
 
 clear_data_from_previous_attempt(
-  FeatureName, [rabbit_vhost | Rest]) ->
-    ok = rabbit_vhost:clear_data_in_khepri(),
-    clear_data_from_previous_attempt(FeatureName, Rest);
-clear_data_from_previous_attempt(
-  FeatureName, [rabbit_user | Rest]) ->
-    ok = rabbit_auth_backend_internal:clear_data_in_khepri(),
-    clear_data_from_previous_attempt(FeatureName, Rest);
-clear_data_from_previous_attempt(
-  FeatureName, [rabbit_user_permission | Rest]) ->
-    clear_data_from_previous_attempt(FeatureName, Rest);
-clear_data_from_previous_attempt(
-  FeatureName, [rabbit_topic_permission | Rest]) ->
-    clear_data_from_previous_attempt(FeatureName, Rest);
-clear_data_from_previous_attempt(
-  FeatureName, [rabbit_runtime_parameters | Rest]) ->
-    ok = rabbit_runtime_parameters:clear_data_in_khepri(),
-    clear_data_from_previous_attempt(FeatureName, Rest);
-clear_data_from_previous_attempt(
-  FeatureName, [rabbit_exchange | Rest]) ->
-    ok = rabbit_store:clear_exchange_data_in_khepri(),
-    clear_data_from_previous_attempt(FeatureName, Rest);
-clear_data_from_previous_attempt(
-  FeatureName, [rabbit_durable_exchange | Rest]) ->
-    ok = rabbit_store:clear_durable_exchange_data_in_khepri(),
-    clear_data_from_previous_attempt(FeatureName, Rest);
-clear_data_from_previous_attempt(
-  FeatureName, [rabbit_exchange_serial | Rest]) ->
-    ok = rabbit_store:clear_exchange_serial_data_in_khepri(),
-    clear_data_from_previous_attempt(FeatureName, Rest);
-clear_data_from_previous_attempt(
-  FeatureName, [rabbit_queue | Rest]) ->
-    ok = rabbit_store:clear_queue_data_in_khepri(),
-    clear_data_from_previous_attempt(FeatureName, Rest);
-clear_data_from_previous_attempt(
-  FeatureName, [rabbit_durable_queue | Rest]) ->
-    ok = rabbit_store:clear_durable_queue_data_in_khepri(),
-    clear_data_from_previous_attempt(FeatureName, Rest);
-clear_data_from_previous_attempt(
-  FeatureName, [rabbit_durable_route | Rest]) ->
-    ok = rabbit_store:clear_route_in_khepri(),
-    clear_data_from_previous_attempt(FeatureName, Rest);
-clear_data_from_previous_attempt(
-  FeatureName, [rabbit_semi_durable_route | Rest]) ->
-    ok = rabbit_store:clear_route_in_khepri(),
-    clear_data_from_previous_attempt(FeatureName, Rest);
-clear_data_from_previous_attempt(
-  FeatureName, [rabbit_route | Rest]) ->
-    ok = rabbit_store:clear_route_in_khepri(),
-    clear_data_from_previous_attempt(FeatureName, Rest);
-clear_data_from_previous_attempt(
-  FeatureName, [rabbit_reverse_route | Rest]) ->
-    ok = rabbit_store:clear_route_in_khepri(),
-    clear_data_from_previous_attempt(FeatureName, Rest);
-clear_data_from_previous_attempt(
-  FeatureName, [rabbit_topic_trie_node | Rest]) ->
-    clear_data_from_previous_attempt(FeatureName, Rest);
-clear_data_from_previous_attempt(
-  FeatureName, [rabbit_topic_trie_edge | Rest]) ->
-    clear_data_from_previous_attempt(FeatureName, Rest);
-clear_data_from_previous_attempt(
-  FeatureName, [rabbit_topic_trie_binding | Rest]) ->
-    ok = rabbit_store:clear_topic_trie_binding_data_in_khepri(),
-    clear_data_from_previous_attempt(FeatureName, Rest);
-clear_data_from_previous_attempt(
-  FeatureName, [rabbit_listener | Rest]) ->
-    ok = rabbit_store:clear_listener_data_in_khepri(),
+  FeatureName, [{Table, Mod, ExtraArgs} | Rest]) ->
+    ok = Mod:clear_data_in_khepri(Table, ExtraArgs),
     clear_data_from_previous_attempt(FeatureName, Rest);
 clear_data_from_previous_attempt(_, []) ->
     ok.
@@ -575,8 +521,10 @@ subscribe_to_mnesia_changes(FeatureName, [Table | Rest]) ->
     ?LOG_DEBUG(
        "Feature flag `~s`:     subscribe to writes to ~s",
        [FeatureName, Table]),
-    case mnesia:subscribe({table, Table, simple}) of
+    case mnesia:subscribe({table, Table, detailed}) of
         {ok, _} -> subscribe_to_mnesia_changes(FeatureName, Rest);
+        {error, {not_active_local, _}} ->
+            rabbit_log:warning("Feature flag `~s`: table ~s doesn't have a local copy. Until ff v2 is merged it won't be migrated", [FeatureName, Table]);
         Error   -> Error
     end;
 subscribe_to_mnesia_changes(_, []) ->
@@ -586,7 +534,7 @@ unsubscribe_to_mnesia_changes(FeatureName, [Table | Rest]) ->
     ?LOG_DEBUG(
        "Feature flag `~s`:     subscribe to writes to ~s",
        [FeatureName, Table]),
-    case mnesia:unsubscribe({table, Table, simple}) of
+    case mnesia:unsubscribe({table, Table, detailed}) of
         {ok, _} -> unsubscribe_to_mnesia_changes(FeatureName, Rest);
         Error   -> Error
     end;
@@ -594,93 +542,10 @@ unsubscribe_to_mnesia_changes(_, []) ->
     ok.
 
 copy_from_mnesia_to_khepri(
-  FeatureName, [rabbit_vhost = Table | Rest]) ->
-    Fun = fun rabbit_vhost:mnesia_write_to_khepri/1,
-    do_copy_from_mnesia_to_khepri(FeatureName, Table, Fun),
-    copy_from_mnesia_to_khepri(FeatureName, Rest);
-copy_from_mnesia_to_khepri(
-  FeatureName, [rabbit_user = Table | Rest]) ->
-    Fun = fun rabbit_auth_backend_internal:mnesia_write_to_khepri/1,
-    do_copy_from_mnesia_to_khepri(FeatureName, Table, Fun),
-    copy_from_mnesia_to_khepri(FeatureName, Rest);
-copy_from_mnesia_to_khepri(
-  FeatureName, [rabbit_user_permission = Table | Rest]) ->
-    Fun = fun rabbit_auth_backend_internal:mnesia_write_to_khepri/1,
-    do_copy_from_mnesia_to_khepri(FeatureName, Table, Fun),
-    copy_from_mnesia_to_khepri(FeatureName, Rest);
-copy_from_mnesia_to_khepri(
-  FeatureName, [rabbit_topic_permission = Table | Rest]) ->
-    Fun = fun rabbit_auth_backend_internal:mnesia_write_to_khepri/1,
-    do_copy_from_mnesia_to_khepri(FeatureName, Table, Fun),
-    copy_from_mnesia_to_khepri(FeatureName, Rest);
-copy_from_mnesia_to_khepri(
-  FeatureName, [rabbit_runtime_parameters = Table | Rest]) ->
-    Fun = fun rabbit_runtime_parameters:mnesia_write_to_khepri/1,
-    do_copy_from_mnesia_to_khepri(FeatureName, Table, Fun),
-    copy_from_mnesia_to_khepri(FeatureName, Rest);
-copy_from_mnesia_to_khepri(
-  FeatureName, [rabbit_queue = Table | Rest]) ->
-    Fun = fun rabbit_store:mnesia_write_queue_to_khepri/1,
-    do_copy_from_mnesia_to_khepri(FeatureName, Table, Fun),
-    copy_from_mnesia_to_khepri(FeatureName, Rest);
-copy_from_mnesia_to_khepri(
-  FeatureName, [rabbit_durable_queue = Table | Rest]) ->
-    Fun = fun rabbit_store:mnesia_write_durable_queue_to_khepri/1,
-    do_copy_from_mnesia_to_khepri(FeatureName, Table, Fun),
-    copy_from_mnesia_to_khepri(FeatureName, Rest);
-copy_from_mnesia_to_khepri(
-  FeatureName, [rabbit_exchange = Table | Rest]) ->
-    Fun = fun rabbit_store:mnesia_write_exchange_to_khepri/1,
-    do_copy_from_mnesia_to_khepri(FeatureName, Table, Fun),
-    copy_from_mnesia_to_khepri(FeatureName, Rest);
-copy_from_mnesia_to_khepri(
-  FeatureName, [rabbit_durable_exchange = Table | Rest]) ->
-    Fun = fun rabbit_store:mnesia_write_durable_exchange_to_khepri/1,
-    do_copy_from_mnesia_to_khepri(FeatureName, Table, Fun),
-    copy_from_mnesia_to_khepri(FeatureName, Rest);
-copy_from_mnesia_to_khepri(
-  FeatureName, [rabbit_exchange_serial = Table | Rest]) ->
-    Fun = fun rabbit_store:mnesia_write_exchange_serial_to_khepri/1,
-    do_copy_from_mnesia_to_khepri(FeatureName, Table, Fun),
-    copy_from_mnesia_to_khepri(FeatureName, Rest);
-copy_from_mnesia_to_khepri(
-  FeatureName, [rabbit_durable_route = Table | Rest]) ->
-    Fun = fun rabbit_store:mnesia_write_durable_route_to_khepri/1,
-    do_copy_from_mnesia_to_khepri(FeatureName, Table, Fun),
-    copy_from_mnesia_to_khepri(FeatureName, Rest);
-copy_from_mnesia_to_khepri(
-  FeatureName, [rabbit_semi_durable_route = Table | Rest]) ->
-    Fun = fun rabbit_store:mnesia_write_semi_durable_route_to_khepri/1,
-    do_copy_from_mnesia_to_khepri(FeatureName, Table, Fun),
-    copy_from_mnesia_to_khepri(FeatureName, Rest);
-copy_from_mnesia_to_khepri(
-  FeatureName, [rabbit_route = Table | Rest]) ->
-    Fun = fun rabbit_store:mnesia_write_route_to_khepri/1,
-    do_copy_from_mnesia_to_khepri(FeatureName, Table, Fun),
-    copy_from_mnesia_to_khepri(FeatureName, Rest);
-copy_from_mnesia_to_khepri(
-  FeatureName, [rabbit_reverse_route = Table | Rest]) ->
-    Fun = fun rabbit_store:mnesia_write_reverse_route_to_khepri/1,
-    do_copy_from_mnesia_to_khepri(FeatureName, Table, Fun),
-    copy_from_mnesia_to_khepri(FeatureName, Rest);
-copy_from_mnesia_to_khepri(
-  FeatureName, [rabbit_topic_trie_node | Rest]) ->
-    %% Nothing to do, the `rabbit_topic_trie_binding` is enough to perform the migration
-    %% as Khepri stores each topic binding as a single path
-    copy_from_mnesia_to_khepri(FeatureName, Rest);
-copy_from_mnesia_to_khepri(
-  FeatureName, [rabbit_topic_trie_edge | Rest]) ->
-    %% Nothing to do, the `rabbit_topic_trie_binding` is enough to perform the migration
-    %% as Khepri stores each topic binding as a single path
-    copy_from_mnesia_to_khepri(FeatureName, Rest);
-copy_from_mnesia_to_khepri(
-  FeatureName, [rabbit_topic_trie_binding = Table | Rest]) ->
-    Fun = fun rabbit_store:mnesia_write_topic_trie_binding_to_khepri/1,
-    do_copy_from_mnesia_to_khepri(FeatureName, Table, Fun),
-    copy_from_mnesia_to_khepri(FeatureName, Rest);
-copy_from_mnesia_to_khepri(
-  FeatureName, [rabbit_listener = Table | Rest]) ->
-    Fun = fun rabbit_store:mnesia_write_listener_to_khepri/1,
+  FeatureName, [{Table, Mod, ExtraArgs} | Rest]) ->
+    Fun = fun(Entry) ->
+                  Mod:mnesia_write_to_khepri(Table, Entry, ExtraArgs)
+          end,
     do_copy_from_mnesia_to_khepri(FeatureName, Table, Fun),
     copy_from_mnesia_to_khepri(FeatureName, Rest);
 copy_from_mnesia_to_khepri(_, []) ->
@@ -721,10 +586,11 @@ do_copy_from_mnesia_to_khepri(
     do_copy_from_mnesia_to_khepri(
       FeatureName, Table, NextKey, Fun, Count, Copied + length(Records)).
 
-final_sync_from_mnesia_to_khepri(FeatureName, Tables) ->
+final_sync_from_mnesia_to_khepri(FeatureName, TablesAndOwners) ->
     %% Switch all tables to read-only. All concurrent and future Mnesia
     %% transaction involving a write to one of them will fail with the
     %% `{no_exists, Table}` exception.
+    {Tables, _, _} = lists:unzip3(TablesAndOwners),
     lists:foreach(
       fun(Table) ->
               ?LOG_DEBUG(
@@ -736,40 +602,40 @@ final_sync_from_mnesia_to_khepri(FeatureName, Tables) ->
     %% During the first round of copy, we received all write events as
     %% messages (parallel writes were authorized). Now, we want to consume
     %% those messages to record the writes we probably missed.
-    ok = consume_mnesia_events(FeatureName),
+    ok = consume_mnesia_events(FeatureName, TablesAndOwners),
 
     ok.
 
-consume_mnesia_events(FeatureName) ->
+consume_mnesia_events(FeatureName, TablesAndOwners) ->
     {_, Count} = erlang:process_info(self(), message_queue_len),
     ?LOG_DEBUG(
        "Feature flag `~s`:     handling queued Mnesia events "
        "(about ~b events)",
        [FeatureName, Count]),
-    consume_mnesia_events(FeatureName, Count, 0).
+    consume_mnesia_events(FeatureName, TablesAndOwners, Count, 0).
 
-consume_mnesia_events(FeatureName, Count, Handled) ->
+consume_mnesia_events(FeatureName, TablesAndOwners, Count, Handled) ->
     %% TODO: Batch several events in a single Khepri command.
     Handled1 = Handled + 1,
     receive
-        {mnesia_table_event, {write, NewRecord, _}} ->
+        {mnesia_table_event, {write, Table, NewRecord, _, _}} ->
             ?LOG_DEBUG(
                "Feature flag `~s`:       handling event ~b/~b (write)",
                [FeatureName, Handled1, Count]),
-            handle_mnesia_write(NewRecord),
-            consume_mnesia_events(FeatureName, Count, Handled1);
-        {mnesia_table_event, {delete_object, OldRecord, _}} ->
+            handle_mnesia_write(Table, NewRecord, TablesAndOwners),
+            consume_mnesia_events(FeatureName, TablesAndOwners, Count, Handled1);
+        {mnesia_table_event, {delete, Table, {Table, Key}, _, _}} ->
             ?LOG_DEBUG(
                "Feature flag `~s`:       handling event ~b/~b (delete)",
                [FeatureName, Handled1, Count]),
-            handle_mnesia_delete(OldRecord),
-            consume_mnesia_events(FeatureName, Count, Handled1);
-        {mnesia_table_event, {delete, {Table, Key}, _}} ->
+            handle_mnesia_delete(Table, Key, TablesAndOwners),
+            consume_mnesia_events(FeatureName, TablesAndOwners, Count, Handled1);
+        {mnesia_table_event, {delete, Table, Record, _, _}} ->
             ?LOG_DEBUG(
                "Feature flag `~s`:       handling event ~b/~b (delete)",
                [FeatureName, Handled1, Count]),
-            handle_mnesia_delete(Table, Key),
-            consume_mnesia_events(FeatureName, Count, Handled1)
+            handle_mnesia_delete(Table, Record, TablesAndOwners),
+            consume_mnesia_events(FeatureName, TablesAndOwners, Count, Handled1)
     after 0 ->
               {_, MsgCount} = erlang:process_info(self(), message_queue_len),
               ?LOG_DEBUG(
@@ -781,47 +647,15 @@ consume_mnesia_events(FeatureName, Count, Handled) ->
 
 %% TODO handle mnesia_runtime_parameters, rabbit_amqqueue, rabbit_exchange, rabbit_binding,
 %% rabbit_exchange_type_topic
-handle_mnesia_write(NewRecord) when ?is_vhost(NewRecord) ->
-    rabbit_vhost:mnesia_write_to_khepri(NewRecord);
-handle_mnesia_write(NewRecord) when is_record(NewRecord, user_permission) ->
-    rabbit_auth_backend_internal:mnesia_write_to_khepri(NewRecord);
-handle_mnesia_write(NewRecord) when is_record(NewRecord, topic_permission) ->
-    rabbit_auth_backend_internal:mnesia_write_to_khepri(NewRecord);
-handle_mnesia_write(NewRecord) ->
-    %% The record and the Mnesia table have different names.
-    NewRecord1 = erlang:setelement(1, NewRecord, internal_user),
-    true = ?is_internal_user(NewRecord1),
-    rabbit_auth_backend_internal:mnesia_write_to_khepri(NewRecord1).
+handle_mnesia_write(Table, NewRecord, TablesAndOwners) ->
+    {Mod, _, ExtraArgs} = lists:keyfind(Table, 1, TablesAndOwners),
+    Mod:mnesia_write_to_khepri(Table, NewRecord, ExtraArgs).
 
 %% TODO handle mnesia_runtime_parameters, rabbit_amqqueue, rabbit_exchange, rabbit_binding,
 %% rabbit_exchange_type_topic
-%% TODO do we need to listen to detailed events? If we receive an amqqueue record, we don't
-%% know if it belongs to queue or durable queues. On node down we remove the ram copy of queues
-%% that live on the down node but they might still be durable
-handle_mnesia_delete(OldRecord) when ?is_vhost(OldRecord) ->
-    rabbit_vhost:mnesia_delete_to_khepri(OldRecord);
-handle_mnesia_delete(OldRecord) when ?is_internal_user(OldRecord) ->
-    rabbit_auth_backend_internal:mnesia_delete_to_khepri(OldRecord);
-handle_mnesia_delete(OldRecord) when is_record(OldRecord, user_permission) ->
-    rabbit_auth_backend_internal:mnesia_delete_to_khepri(OldRecord);
-handle_mnesia_delete(OldRecord) when is_record(OldRecord, topic_permission) ->
-    rabbit_auth_backend_internal:mnesia_delete_to_khepri(OldRecord).
-
-handle_mnesia_delete(rabbit_vhost, VHost) ->
-    rabbit_vhost:mnesia_delete_to_khepri(VHost);
-handle_mnesia_delete(rabbit_user, Username) ->
-    rabbit_auth_backend_internal:mnesia_delete_to_khepri(Username);
-handle_mnesia_delete(rabbit_user_permission, UserVHost) ->
-    rabbit_auth_backend_internal:mnesia_delete_to_khepri(UserVHost);
-handle_mnesia_delete(rabbit_topic_permission, TopicPermissionKey) ->
-    rabbit_auth_backend_internal:mnesia_delete_to_khepri(TopicPermissionKey);
-handle_mnesia_delete(rabbit_runtime_parameters, RuntimeParamKey) ->
-    rabbit_runtime_parameters:mnesia_delete_to_khepri(RuntimeParamKey);
-handle_mnesia_delete(rabbit_queue, QName) ->
-    rabbit_store:mnesia_delete_queue_to_khepri(QName);
-handle_mnesia_delete(rabbit_durable_queue, QName) ->
-    rabbit_store:mnesia_delete_durable_queue_to_khepri(QName).
-
+handle_mnesia_delete(Table, Key, TablesAndOwners) ->
+    {Mod, _, ExtraArgs} = lists:keyfind(Table, 1, TablesAndOwners),
+    Mod:mnesia_delete_to_khepri(Table, Key, ExtraArgs).
 
 %% We can't remove unused tables at this point yet. The reason is that tables
 %% are synchronized before feature flags in `rabbit_mnesia`. So if a node is

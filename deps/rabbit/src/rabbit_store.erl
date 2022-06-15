@@ -20,11 +20,6 @@
          delete_exchange_in_mnesia/3, delete_exchange/3,
          recover_exchanges/1, store_durable_exchanges/1, match_exchanges/1]).
 
--export([mnesia_write_exchange_to_khepri/1, mnesia_write_durable_exchange_to_khepri/1,
-         mnesia_write_exchange_serial_to_khepri/1,
-         clear_exchange_data_in_khepri/0, clear_durable_exchange_data_in_khepri/0,
-         clear_exchange_serial_data_in_khepri/0]).
-
 -export([exists_binding/1, add_binding/2, delete_binding/2, list_bindings/1,
          list_bindings_for_source/1, list_bindings_for_destination/1,
          list_bindings_for_source_and_destination/2, list_explicit_bindings/0,
@@ -39,10 +34,6 @@
 %% TODO used by topic exchange. Should it be internal?
 -export([match_source_and_destination_in_khepri/2]).
 
--export([mnesia_write_route_to_khepri/1, mnesia_write_durable_route_to_khepri/1,
-         mnesia_write_semi_durable_route_to_khepri/1, mnesia_write_reverse_route_to_khepri/1,
-         clear_route_in_khepri/0]).
-
 -export([list_queues/0, list_queues/1, list_durable_queues/0, list_durable_queues/1,
          list_durable_queues_by_type/1, list_queue_names/0, count_queues/0, count_queues/1,
          delete_queue/2, internal_delete_queue/3, update_queue/2, lookup_queues/1,
@@ -50,10 +41,7 @@
          update_queue_decorators/1, not_found_or_absent_queue_dirty/1,
          lookup_durable_queues/1]).
 
--export([mnesia_write_queue_to_khepri/1, mnesia_write_durable_queue_to_khepri/1,
-         mnesia_delete_queue_to_khepri/1, mnesia_delete_durable_queue_to_khepri/1,
-         clear_queue_data_in_khepri/0, clear_durable_queue_data_in_khepri/0,
-         store_queue/2, store_queues/1, store_queue_without_recover/2,
+-export([store_queue/2, store_queues/1, store_queue_without_recover/2,
          store_queue_dirty/1]).
 
 %% Routing. These functions are in the hot code path
@@ -62,12 +50,8 @@
 -export([add_listener/1, list_listeners/1, list_listeners/2,
          delete_listener/1, delete_listeners/1]).
 
--export([mnesia_write_listener_to_khepri/1, clear_listener_data_in_khepri/0]).
-
 -export([add_topic_trie_binding/4, delete_topic_trie_bindings_for_exchange/1,
          delete_topic_trie_bindings/1, route_delivery_for_exchange_type_topic/2]).
-
--export([clear_topic_trie_binding_data_in_khepri/0, mnesia_write_topic_trie_binding_to_khepri/1]).
 
 %% TODO maybe refactor after queues are migrated.
 -export([store_durable_queue/1]).
@@ -84,7 +68,12 @@
          create_tracking_table/4,
          add_tracked_item/5,
          delete_tracked_item/4,
-         count_tracked_items/2]).
+         count_tracked_items/2,
+         tracked_table_name_for/2]).
+
+-export([mnesia_write_to_khepri/3,
+         mnesia_delete_to_khepri/3,
+         clear_data_in_khepri/2]).
 
 -define(WAIT_SECONDS, 30).
 
@@ -149,6 +138,9 @@ khepri_listeners_path() ->
 
 khepri_exchange_type_topic_path(#resource{virtual_host = VHost, name = Name}) ->
     [?MODULE, topic_trie_binding, VHost, Name].
+
+khepri_exchange_type_topic_path() ->
+    [?MODULE, topic_trie_binding].
 
 %% Tracking tables
 
@@ -1252,6 +1244,18 @@ count_tracked_items(Name, Node) ->
 %% Feature flags
 %% --------------------------------------------------------------
 
+mnesia_write_to_khepri(rabbit_queue, Q, _ExtraArgs) ->
+    Path = khepri_queue_path(amqqueue:get_name(Q)),
+    case rabbit_khepri:put(Path, Q) of
+        {ok, _} -> ok;
+        Error -> throw(Error)
+    end;
+mnesia_write_to_khepri(rabbit_durable_queue, Q, _ExtraArgs) ->
+    Path = khepri_durable_queue_path(amqqueue:get_name(Q)),
+    case rabbit_khepri:put(Path, Q) of
+        {ok, _} -> ok;
+        Error -> throw(Error)
+    end;
 %% Mnesia contains two tables if an exchange has been recovered:
 %% rabbit_exchange (ram) and rabbit_durable_exchange (disc).
 %% As all data in Khepri is persistent, there is no point on
@@ -1265,143 +1269,35 @@ count_tracked_items(Name, Node) ->
 %% If ram table is migrated first, the record will be moved as is.
 %% If the disc table is migrated first, the record is updated with
 %% the exchange decorators.
-mnesia_write_exchange_to_khepri(
-  #exchange{name = Resource} = Exchange) ->
+mnesia_write_to_khepri(rabbit_exchange, #exchange{name = Resource} = Exchange, _ExtraArgs) ->
     Path = khepri_exchange_path(Resource),
-    case rabbit_khepri:create(Path, Exchange) of
-        {ok, _} -> ok;
-        {error, {mismatching_node, _}} -> ok;
-        Error -> throw(Error)
-    end.
-
-mnesia_write_durable_exchange_to_khepri(
-  #exchange{name = Resource} = Exchange0) ->
+    khepri_create(Path, Exchange);
+mnesia_write_to_khepri(rabbit_durable_exchange, #exchange{name = Resource} = Exchange0,
+                       _ExtraArgs) ->
     Path = khepri_exchange_path(Resource),
     Exchange = rabbit_exchange_decorator:set(Exchange0),
-    case rabbit_khepri:create(Path, Exchange) of
-        {ok, _} -> ok;
-        {error, {mismatching_node, _}} -> ok;
-        Error -> throw(Error)
-    end.
-
-mnesia_write_exchange_serial_to_khepri(
-  #exchange_serial{name = Resource} = Exchange) ->
+    khepri_create(Path, Exchange);
+mnesia_write_to_khepri(rabbit_exchange_serial, #exchange_serial{name = Resource} = Exchange,
+                       _ExtraArgs) ->
     Path = khepri_path:combine_with_conditions(khepri_exchange_serial_path(Resource),
                                                [#if_node_exists{exists = false}]),
     Extra = #{keep_while => #{khepri_exchange_path(Resource) => #if_node_exists{exists = true}}},
     case rabbit_khepri:put(Path, Exchange, Extra) of
         {ok, _} -> ok;
         Error -> throw(Error)
-    end.
-
-%% There is a single khepri entry for exchanges. Clear it anyway.
-clear_exchange_data_in_khepri() ->
-    clear_durable_exchange_data_in_khepri().
-
-clear_durable_exchange_data_in_khepri() ->
-    Path = khepri_exchanges_path(),
-    case rabbit_khepri:delete(Path) of
-        {ok, _} -> ok;
-        Error -> throw(Error)
-    end.
-
-clear_exchange_serial_data_in_khepri() ->
-    Path = khepri_exchange_serials_path(),
-    case rabbit_khepri:delete(Path) of
-        {ok, _} -> ok;
-        Error -> throw(Error)
-    end.
-
-mnesia_write_route_to_khepri(#route{binding = Binding})->
-    store_binding(Binding, transient).
-
-mnesia_write_durable_route_to_khepri(#route{binding = Binding})->
-    store_binding(Binding, durable).
-
-mnesia_write_semi_durable_route_to_khepri(#route{binding = Binding})->
-    store_binding(Binding, semi_durable).
-
-mnesia_write_reverse_route_to_khepri(_)->
-    ok.
-
-clear_route_in_khepri() ->
-    Path = khepri_routes_path(),
-    RoutingPath = khepri_routing_path(),
-    case rabbit_khepri:delete(Path) of
-        {ok, _} ->
-            case rabbit_khepri:delete(RoutingPath) of
-                {ok, _} -> ok;
-                Error -> throw(Error)
-            end;
-        Error -> throw(Error)
-    end.
-
-mnesia_write_queue_to_khepri(Q) ->
-    Path = khepri_queue_path(amqqueue:get_name(Q)),
-    case rabbit_khepri:put(Path, Q) of
-        {ok, _} -> ok;
-        Error -> throw(Error)
-    end.
-
-mnesia_write_durable_queue_to_khepri(Q) ->
-    Path = khepri_durable_queue_path(amqqueue:get_name(Q)),
-    case rabbit_khepri:put(Path, Q) of
-        {ok, _} -> ok;
-        Error -> throw(Error)
-    end.
-
-mnesia_delete_queue_to_khepri(Q) when ?is_amqqueue(Q) ->
-    mnesia_delete_queue_to_khepri(amqqueue:get_name(Q));
-mnesia_delete_queue_to_khepri(#resource{} = Name) ->
-    Path = khepri_queue_path(Name),
-    case rabbit_khepri:delete(Path) of
-        {ok, _} -> ok;
-        Error -> throw(Error)
-    end.
-
-mnesia_delete_durable_queue_to_khepri(Q) when ?is_amqqueue(Q) ->
-    mnesia_delete_durable_queue_to_khepri(amqqueue:get_name(Q));
-mnesia_delete_durable_queue_to_khepri(#resource{} = Name) ->
-    Path = khepri_durable_queue_path(Name),
-    case rabbit_khepri:delete(Path) of
-        {ok, _} -> ok;
-        Error -> throw(Error)
-    end.
-
-clear_queue_data_in_khepri() ->
-    Path = khepri_queues_path(),
-    case rabbit_khepri:delete(Path) of
-        {ok, _} -> ok;
-        Error -> throw(Error)
-    end.
-
-clear_durable_queue_data_in_khepri() ->
-    Path = khepri_durable_queues_path(),
-    case rabbit_khepri:delete(Path) of
-        {ok, _} -> ok;
-        Error -> throw(Error)
-    end.
-
-mnesia_write_listener_to_khepri(Listener) ->
-    add_listener_in_khepri(Listener).
-
-clear_listener_data_in_khepri() ->
-    Path = khepri_listeners_path(),
-    case rabbit_khepri:delete(Path) of
-        {ok, _} -> ok;
-        Error -> throw(Error)
-    end.
-
-clear_topic_trie_binding_data_in_khepri() ->
-    Path = [?MODULE, topic_trie_binding],
-    case rabbit_khepri:delete(Path) of
-        {ok, _} -> ok;
-        Error -> throw(Error)
-    end.
-
-mnesia_write_topic_trie_binding_to_khepri(
-  #topic_trie_binding{trie_binding = #trie_binding{exchange_name = X,
-                                                   destination   = D}}) ->
+    end;
+mnesia_write_to_khepri(rabbit_route, #route{binding = Binding}, _ExtraArgs)->
+    store_binding(Binding, transient);
+mnesia_write_to_khepri(rabbit_durable_route, #route{binding = Binding}, _ExtraArgs)->
+    store_binding(Binding, durable);
+mnesia_write_to_khepri(rabbit_semi_durable_route, #route{binding = Binding}, _ExtraArgs)->
+    store_binding(Binding, semi_durable);
+mnesia_write_to_khepri(rabbit_reverse_route, _, _ExtraArgs) ->
+    ok;
+mnesia_write_to_khepri(rabbit_topic_trie_binding,
+                       #topic_trie_binding{trie_binding = #trie_binding{exchange_name = X,
+                                                                        destination   = D}},
+                       _ExtraArgs) ->
     %% There isn't enough information to rebuild the tree as the routing key is split
     %% along the trie tree on mnesia. But, we can query the bindings table (migrated
     %% previosly) and migrate the entries that match this <X, D> combo
@@ -1414,7 +1310,68 @@ mnesia_write_topic_trie_binding_to_khepri(
                            end, [], Values),
     [add_topic_trie_binding(X, K, D, Args) || #binding{key = K,
                                                        args = Args} <- Bindings],
-    ok.
+    ok;
+mnesia_write_to_khepri(rabbit_topic_trie_node, _, _ExtraArgs) ->
+    %% Nothing to do, the `rabbit_topic_trie_binding` is enough to perform the migration
+    %% as Khepri stores each topic binding as a single path
+    ok;
+mnesia_write_to_khepri(rabbit_topic_trie_edge, _, _ExtraArgs) ->
+    %% Nothing to do, the `rabbit_topic_trie_binding` is enough to perform the migration
+    %% as Khepri stores each topic binding as a single path
+    ok;
+mnesia_write_to_khepri(rabbit_listener, Listener, _ExtraArgs) ->
+    add_listener_in_khepri(Listener);
+mnesia_write_to_khepri(_Table, Entry, #{type := tracking, name := Name, node := Node,
+                                        key := KeyPos}) ->
+    khepri_create(khepri_tracking_path(Name, Node, as_list(element(KeyPos, Entry))), Entry);
+mnesia_write_to_khepri(_Table, Entry, #{type := tracking_counter, name := Name, node := Node,
+                                        key := KeyPos, counter := CounterPos}) ->
+    khepri_create(khepri_tracking_path(Name, Node, as_list(element(KeyPos, Entry))),
+                  element(CounterPos, Entry)).
+
+mnesia_delete_to_khepri(rabbit_queue, Q, _ExtraArgs) when ?is_amqqueue(Q) ->
+    khepri_delete(khepri_queue_path(amqqueue:get_name(Q)));
+mnesia_delete_to_khepri(rabbit_queue, Name, _ExtraArgs) when is_record(Name, resource) ->
+    khepri_delete(khepri_queue_path(Name));
+mnesia_delete_to_khepri(rabbit_durable_queue, Q, _ExtraArgs) when ?is_amqqueue(Q) ->
+    khepri_delete(khepri_durable_queue_path(amqqueue:get_name(Q)));
+mnesia_delete_to_khepri(rabbit_durable_queue, Name, _ExtraArgs) when is_record(Name, resource) ->
+    khepri_delete(khepri_durable_queue_path(Name)).
+
+clear_data_in_khepri(rabbit_queue, _ExtraArgs) ->
+    khepri_delete(khepri_queues_path());
+clear_data_in_khepri(rabbit_durable_queue, _ExtraArgs) ->
+    khepri_delete(khepri_durable_queues_path());
+clear_data_in_khepri(rabbit_listener, _ExtraArgs) ->
+    khepri_delete(khepri_listeners_path());
+clear_data_in_khepri(rabbit_exchange, _ExtraArgs) ->
+    khepri_delete(khepri_exchanges_path());
+%% There is a single khepri entry for exchanges and it should be already deleted
+clear_data_in_khepri(rabbit_durable_exchange, _ExtraArgs) ->
+    ok;
+clear_data_in_khepri(rabbit_exchange_serial, _ExtraArgs) ->
+    khepri_delete(khepri_exchange_serials_path());
+clear_data_in_khepri(rabbit_route, _ExtraArgs) ->
+    khepri_delete(khepri_routes_path()),
+    khepri_delete(khepri_routing_path());
+%% There is a single khepri entry for routes and it should be already deleted
+clear_data_in_khepri(rabbit_durable_route, _ExtraArgs) ->
+    ok;
+clear_data_in_khepri(rabbit_semi_durable_route, _ExtraArgs) ->
+    ok;
+clear_data_in_khepri(rabbit_reverse_route, _ExtraArgs) ->
+    ok;
+clear_data_in_khepri(rabbit_topic_trie_binding, _ExtraArgs) ->
+    khepri_delete(khepri_exchange_type_topic_path());
+%% There is a single khepri entry for topics and it should be already deleted
+clear_data_in_khepri(rabbit_topic_trie_node, _ExtraArgs) ->
+    ok;
+clear_data_in_khepri(rabbit_topic_trie_edge, _ExtraArgs) ->
+    ok;
+clear_data_in_khepri(_Table, #{type := tracking, name := Name, node := Node}) ->
+    khepri_delete(khepri_tracking_path(Name, Node));
+clear_data_in_khepri(_Table, #{type := tracking_counter, name := Name, node := Node}) ->
+    khepri_delete(khepri_tracking_path(Name, Node)).
 
 %% Internal
 %% -------------------------------------------------------------
@@ -2521,3 +2478,16 @@ as_list(T) when is_tuple(T) ->
     tuple_to_list(T);
 as_list(Any) ->
     [Any].
+
+khepri_create(Path, Value) ->
+    case rabbit_khepri:create(Path, Value) of
+        {ok, _} -> ok;
+        {error, {mismatching_node, _}} -> ok;
+        Error -> throw(Error)
+    end.
+
+khepri_delete(Path) ->
+    case rabbit_khepri:delete(Path) of
+        {ok, _} -> ok;
+        Error -> throw(Error)
+    end.
