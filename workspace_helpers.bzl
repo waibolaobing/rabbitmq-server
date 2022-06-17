@@ -143,8 +143,8 @@ erlang_app(
     github_erlang_app(
         name = "khepri",
         org = "rabbitmq",
-        ref = "2d7695bc9847fcab0e30b26935ca2a38e7cf6f9b",
-        version = "2d7695bc9847fcab0e30b26935ca2a38e7cf6f9b",
+        ref = "0f55c107fce35e2bd235068b7d5bd8d6ad007187",
+        version = "0f55c107fce35e2bd235068b7d5bd8d6ad007187",
         build_file = rabbitmq_workspace + "//:BUILD.khepri",
     )
 
