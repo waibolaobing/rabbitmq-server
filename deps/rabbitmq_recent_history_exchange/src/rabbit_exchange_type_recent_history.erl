@@ -20,6 +20,11 @@
 -export([setup_schema/0, disable_plugin/0]).
 -export([info/1, info/2]).
 
+-export([mds_migration/3,
+         mnesia_write_to_khepri/3,
+         mnesia_delete_to_khepri/3,
+         clear_data_in_khepri/2]).
+
 -rabbit_boot_step({?MODULE,
                    [{description, "exchange type x-recent-history"},
                     {mfa, {rabbit_registry, register,
@@ -33,6 +38,15 @@
                     {mfa, {?MODULE, setup_schema, []}},
                     {requires, database},
                     {enables, external_infrastructure}]}).
+
+-rabbit_feature_flag(
+   {rabbit_recent_history_exchange_raft_based_metadata_store,
+    #{desc          => "Use the new Raft-based metadata store",
+      doc_url       => "", %% TODO
+      stability     => experimental,
+      depends_on    => [raft_based_metadata_store_phase1],
+      migration_fun => {?MODULE, mds_migration}
+     }}).
 
 -define(INTEGER_ARG_TYPES, [byte, short, signedint, long]).
 
@@ -124,6 +138,40 @@ remove_bindings(_Tx, _X, _Bs) -> ok.
 
 assert_args_equivalence(X, Args) ->
     rabbit_exchange:assert_args_equivalence(X, Args).
+
+mds_migration(FeatureName, FeatureProps, IsEnabled) ->
+    TablesAndOwners = [{?RH_TABLE, ?MODULE, #{}}],
+    rabbit_core_ff:mds_migration(FeatureName, FeatureProps, TablesAndOwners, IsEnabled).
+
+clear_data_in_khepri(?RH_TABLE, _ExtraArgs) ->
+    case rabbit_khepri:delete(khepri_recent_history_path()) of
+        {ok, _} ->
+            ok;
+        Error ->
+            throw(Error)
+    end.
+
+mnesia_write_to_khepri(?RH_TABLE, #cached{key = Key, content = Content}, _ExtraArgs) ->
+    case rabbit_khepri:create(khepri_recent_history_path(Key), Content) of
+        {ok, _} -> ok;
+        {error, {mismatching_node, _}} -> ok;
+        Error -> throw(Error)
+    end.
+
+mnesia_delete_to_khepri(?RH_TABLE, #cached{key = Key}, _ExtraArgs) ->
+    case rabbit_khepri:delete(khepri_recent_history_path(Key)) of
+        {ok, _} ->
+            ok;
+        Error ->
+            throw(Error)
+    end;
+mnesia_delete_to_khepri(?RH_TABLE, Key, _ExtraArgs) ->
+    case rabbit_khepri:delete(khepri_recent_history_path(Key)) of
+        {ok, _} ->
+            ok;
+        Error ->
+            throw(Error)
+    end.
 
 %%----------------------------------------------------------------------------
 
