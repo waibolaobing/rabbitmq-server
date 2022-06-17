@@ -51,6 +51,14 @@
                     , {requires, database}
                     , {enables, external_infrastructure} ] }).
 
+-rabbit_feature_flag(
+   {rabbit_jms_topic_exchange_raft_based_metadata_store,
+    #{desc          => "Use the new Raft-based metadata store",
+      doc_url       => "", %% TODO
+      stability     => experimental,
+      depends_on    => [raft_based_metadata_store_phase1],
+      migration_fun => {?MODULE, mds_migration}
+     }}).
 %%----------------------------------------------------------------------------
 
 % Initialise database table for all exchanges of type <<"x-jms-topic">>
@@ -166,6 +174,41 @@ policy_changed(_X1, _X2) -> ok.
 info(_X) -> [].
 info(_X, _) -> [].
 
+
+mds_migration(FeatureName, FeatureProps, IsEnabled) ->
+    TablesAndOwners = [{?JMS_TOPIC_TABLE, ?MODULE, #{}}],
+    rabbit_core_ff:mds_migration(FeatureName, FeatureProps, TablesAndOwners, IsEnabled).
+
+clear_data_in_khepri(?JMS_TOPIC_TABLE, _ExtraArgs) ->
+    case rabbit_khepri:delete(khepri_jms_topic_exchange_path()) of
+        {ok, _} ->
+            ok;
+        Error ->
+            throw(Error)
+    end.
+
+mnesia_write_to_khepri(?JMS_TOPIC_TABLE, #?JMS_TOPIC_RECORD{x_name = XName, x_selector_funs = BFuns},
+                       _ExtraArgs) ->
+    case rabbit_khepri:create(khepri_jms_topic_exchange_path(XName), BFuns) of
+        {ok, _} -> ok;
+        {error, {mismatching_node, _}} -> ok;
+        Error -> throw(Error)
+    end.
+
+mnesia_delete_to_khepri(?JMS_TOPIC_TABLE, #?JMS_TOPIC_RECORD{x_name = XName}, _ExtraArgs) ->
+    case rabbit_khepri:delete(khepri_jms_topic_exchange_path(XName)) of
+        {ok, _} ->
+            ok;
+        Error ->
+            throw(Error)
+    end;
+mnesia_delete_to_khepri(?JMS_TOPIC_TABLE, Key, _ExtraArgs) ->
+    case rabbit_khepri:delete(khepri_jms_topic_exchange_path(Key)) of
+        {ok, _} ->
+            ok;
+        Error ->
+            throw(Error)
+    end.
 
 %%----------------------------------------------------------------------------
 %% P R I V A T E   F U N C T I O N S

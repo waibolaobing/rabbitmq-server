@@ -23,7 +23,8 @@
 all() ->
     [
      {group, mnesia_store},
-     {group, khepri_store}
+     {group, khepri_store},
+     {group, khepri_migration}
     ].
 
 groups() ->
@@ -35,7 +36,10 @@ groups() ->
      {khepri_store, [], [{parallel_tests, [parallel], [
                                                        test_topic_selection
                                                       ]}
-                        ]}
+                        ]},
+     {khepri_migration, [], [
+                             from_mnesia_to_khepri
+                            ]}
     ].
 
 %% -------------------------------------------------------------------
@@ -98,6 +102,33 @@ test_topic_selection(Config) ->
     close_connection_and_channel(Connection, Channel),
     ok.
 
+from_mnesia_to_khepri(Config) ->
+    {Connection, Channel} = open_connection_and_channel(Config),
+    #'confirm.select_ok'{} = amqp_channel:call(Channel, #'confirm.select'{}),
+
+    Exchange = declare_rjms_exchange(Channel, "rjms_test_topic_selector_exchange", []),
+
+    %% Declare a queue and bind it
+    Q = declare_queue(Channel),
+    bind_queue(Channel, Q, Exchange, <<"select-key">>, [?BSELECTARG(<<"{ident, <<\"boolVal\">>}.">>)]),
+
+    case rabbit_ct_broker_helpers:enable_feature_flag(Config, raft_based_metadata_store_phase1) of
+        ok ->
+            case rabbit_ct_broker_helpers:enable_feature_flag(Config, rabbit_jms_topic_exchange_raft_based_metadata_store) of
+                ok ->                    
+                    publish_two_messages(Channel, Exchange, <<"select-key">>),
+                    amqp_channel:wait_for_confirms(Channel, 5),
+                    
+                    get_and_check(Channel, Q, 0, <<"true">>),
+                    
+                    close_connection_and_channel(Connection, Channel),
+                    ok;
+                Skip ->
+                    Skip
+            end;
+        Skip ->
+            Skip
+    end.
 
 %% -------------------------------------------------------------------
 %% Helpers.
